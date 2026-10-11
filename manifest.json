@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "DeepSeek Web Local AI Bridge",
+  "version": "1.0.0",
+  "description": "Connects your open chat.deepseek.com tab to Local OpenAI-compatible Server (localhost:8765)",
+  "content_scripts": [
+    {
+      "matches": ["https://chat.deepseek.com/*"],
+      "js": ["bridge.user.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ]
+}
