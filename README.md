@@ -1,85 +1,85 @@
 # DeepSeek Web Local API (`deepseek-web-local-api`)
 
-Biến phiên đăng nhập sẵn trên **DeepSeek Web (`https://chat.deepseek.com`)** thành một **Local OpenAI-Compatible API Server (`http://127.0.0.1:8765/v1`)** tối ưu chuyên biệt cho **Pigent (`pi` coding agent)** và các công cụ lập trình AI.
+Turn an active **DeepSeek Web (`https://chat.deepseek.com`)** browser session into a **Local OpenAI-Compatible API Server (`http://127.0.0.1:8765/v1`)** purpose-built for **Pigent (`pi` coding agent)** and other AI coding assistants.
 
 ---
 
-## ✨ Tính năng nổi bật
+## ✨ Key Features
 
-- **Tương thích chuẩn OpenAI `/v1/chat/completions`**: Hỗ trợ cả `stream: true` và `stream: false`, truyền trực tiếp luồng suy luận (`reasoning_content`) theo thời gian thực lên TUI của `pi`.
-- **Giải PoW (`DeepSeekHashV1` SHA-3 WASM) ngay trong tab trình duyệt**: Không cần trích xuất cookie thủ công, tự động tận dụng phiên Cloudflare & thiết bị (`SMSdk`) của tab `chat.deepseek.com`.
-- **Stateful Session Chaining (`parent_message_id`)**: Tự động nối chuỗi hội thoại trên server DeepSeek — chỉ lượt đầu tiên (`ROOT`) gửi toàn bộ System Prompt & Skills, các lượt gọi tool tiếp theo (`CHAIN`) chỉ gửi phần `[TOOL_RESULT]` mới phát sinh, giúp tận dụng trọn vẹn **128K context window** và tăng tốc phản hồi.
-- **Bộ chuyển đổi Tool Calling đa định dạng cho `pi` agent**:
-  - Hỗ trợ chuẩn JSON `{"name": "...", "arguments": {...}}`, Flat JSON `{"name": "bash", "command": "..."}`, Native DeepSeek DSML (`<｜DSML｜invoke>`, `<｜｜DSML｜｜ parameter>`), và Hybrid JSON + DSML.
-  - Tự động xử lý trường hợp code/markdown chứa dấu ```` ``` ```` lồng trong lệnh `write` / `edit` và tự động ép kiểu tham số (`array`, `number`, `boolean`) theo JSON Schema của tool.
-- **Chống Rate-Limit tự động (`Smart Pacing` + `Exponential Backoff`)**:
-  - Tự động điều tiết nhịp gửi giữa các bước tool call siêu nhanh của `pi`.
-  - Khi DeepSeek Web báo `"Tin nhắn quá thường xuyên. Vui lòng thử lại sau."`, server tự động chờ theo lịch `[5s, 10s, 16s, 24s, 35s]` và gửi lại mà không làm đứt chuỗi tác vụ của `pi`.
-- **Điều khiển mức độ suy nghĩ (`Shift+Tab` trong `pi`)**:
-  - Hỗ trợ bật/tắt nhanh DeepThink (`off` $\rightarrow$ tắt DeepThink, `minimal`/`low`/`medium`/`high`/`xhigh`/`max` $\rightarrow$ bật DeepThink kèm điều chỉnh độ sâu suy luận).
+- **OpenAI `/v1/chat/completions` Compatible**: Supports both `stream: true` and `stream: false`, streaming live `reasoning_content` (`<think>` tokens) in real time to `pi`'s TUI.
+- **In-Browser WASM PoW Solver (`DeepSeekHashV1` SHA-3)**: Solves DeepSeek's proof-of-work challenge directly inside the authenticated `chat.deepseek.com` tab—no manual cookie extraction required, automatically inheriting Cloudflare clearance and `SMSdk` device fingerprint headers.
+- **Stateful Session Chaining (`parent_message_id`)**: Automatically chains multi-turn agent steps onto the active DeepSeek Web `chat_session_id`. Only the initial `ROOT` turn sends the full System Prompt and Skills; subsequent `CHAIN` turns send only incremental `[TOOL_RESULT]` deltas, preserving the full **128K context window** and minimizing latency.
+- **Multi-Format Tool Calling Adapter for `pi` Agent**:
+  - Parses standard OpenAI-style JSON (`{"name": "...", "arguments": {...}}`), flat JSON (`{"name": "bash", "command": "..."}`), native DeepSeek DSML (`<｜DSML｜invoke>`, `<｜｜DSML｜｜ parameter>`), and hybrid JSON + DSML outputs.
+  - Safely handles nested markdown code fences (```` ``` ````) inside `write` / `edit` payloads using `json.JSONDecoder().raw_decode` and coerces non-string parameters (`array`, `number`, `boolean`) against the tool's JSON Schema.
+- **Smart Pacing & Automatic Rate-Limit Recovery**:
+  - Paces rapid back-to-back tool execution turns so DeepSeek Web's burst limiter is avoided.
+  - Automatically retries rate-limited requests with exponential backoff (`[5s, 10s, 16s, 24s, 35s]`) while keeping the stream alive, preventing multi-step coding tasks from aborting.
+- **Interactive Thinking Level Control (`Shift+Tab` in `pi`)**:
+  - Maps `pi` thinking levels directly to DeepSeek Web: `off` disables DeepThink (`thinking_enabled: false`), while `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` enable DeepThink and steer reasoning depth.
 
 ---
 
-## 📁 Cấu trúc thư mục
+## 📁 Project Structure
 
-| File | Vai trò |
+| File | Description |
 | :--- | :--- |
-| `server.py` | Local OpenAI API Server (`http://127.0.0.1:8765/v1`) + WebSocket Hub (`ws://127.0.0.1:8765/ws`) + SSE Parser + Tool Call Adapter |
-| `bridge.user.js` | Content Script / Userscript chạy trên `https://chat.deepseek.com`, tự giải WASM PoW và đọc stream SSE |
-| `manifest.json` | Manifest Chrome Extension (MV3) giúp nạp trực tiếp thư mục này vào Chrome ở chế độ Developer Mode (không cần cài Tampermonkey) |
+| `server.py` | Local OpenAI API Server (`http://127.0.0.1:8765/v1`), WebSocket Hub (`ws://127.0.0.1:8765/ws`), SSE patch parser, and Tool Call adapter |
+| `bridge.user.js` | Content Script / Userscript running on `https://chat.deepseek.com` that solves WASM PoW and streams SSE frames over WebSocket |
+| `manifest.json` | Chrome Extension (Manifest V3) configuration for loading the project directly as an unpacked extension |
 
 ---
 
-## 🚀 Hướng dẫn cài đặt từ đầu
+## 🚀 Quick Start
 
-### Bước 1: Cài thư viện Python
-Chỉ cần `fastapi`, `uvicorn` và `websockets`:
+### Step 1: Install Python Dependencies
+Only `fastapi`, `uvicorn`, and `websockets` are required:
 ```bash
 pip install fastapi uvicorn websockets
 ```
 
-Kiểm tra nhanh toàn bộ parser & bộ chuyển đổi tool bằng self-test tích hợp sẵn:
+Run the built-in self-test suite (verifies the SSE parser, session chaining, tool call extraction, and rate-limit matcher):
 ```bash
 python3 server.py --test
 ```
 
 ---
 
-### Bước 2: Nạp Bridge vào trình duyệt Chrome
+### Step 2: Load the Browser Bridge in Chrome
 
-**Cách 1: Nạp trực tiếp làm Chrome Extension (Khuyên dùng)**
-1. Mở Chrome, truy cập `chrome://extensions/`
-2. Bật công tắc **Developer mode (Chế độ dành cho nhà phát triển)** ở góc phải trên.
-3. Nhấn **Load unpacked (Tải tiện ích đã giải nén)** $\rightarrow$ chọn thư mục chứa repo này (`deepseek-web-local-api`).
-4. Mở tab `https://chat.deepseek.com`, đăng nhập tài khoản DeepSeek và nhấn `F5` (Reload).
+**Option A: Load as an Unpacked Chrome Extension (Recommended)**
+1. Open Chrome and navigate to `chrome://extensions/`
+2. Enable **Developer mode** in the top-right corner.
+3. Click **Load unpacked** and select this repository folder (`deepseek-web-local-api`).
+4. Open `https://chat.deepseek.com`, sign in to your DeepSeek account, and refresh the page (`F5` / `Cmd+R`).
 
-**Cách 2: Dùng Tampermonkey / Violentmonkey**
-- Tạo script mới trong Tampermonkey, dán nội dung file `bridge.user.js` vào và lưu lại, sau đó tải lại trang `https://chat.deepseek.com`.
+**Option B: Use Tampermonkey / Violentmonkey**
+- Create a new userscript, paste the contents of `bridge.user.js`, save, and reload `https://chat.deepseek.com`.
 
 ---
 
-### Bước 3: Chạy Local API Server
+### Step 3: Start the Local API Server
 
 ```bash
 python3 server.py
 ```
 
-Khi server chạy và tab `https://chat.deepseek.com` đang mở:
-- Terminal sẽ hiện: `[Local-AI] 🟢 Chrome tab connected to /ws`
-- Góc phải dưới trang `chat.deepseek.com` sẽ hiện nút xanh: **`🟢 Local AI (API)`**
+Once the server is running and `https://chat.deepseek.com` is open in Chrome:
+- The terminal will print: `[Local-AI] 🟢 Chrome tab connected to /ws`
+- A green badge **`🟢 Local AI (API)`** will appear in the bottom-right corner of `chat.deepseek.com`.
 
-Kiểm tra trạng thái kết nối:
+Verify the server health status:
 ```bash
 curl http://127.0.0.1:8765/health
 ```
 
 ---
 
-## 🤖 Cấu hình cho Pigent (`pi` Coding Agent)
+## 🤖 Pigent (`pi` Coding Agent) Configuration
 
-### 1. Khai báo Provider & Models trong `~/.pi/agent/models.json`
+### 1. Register the Provider & Models in `~/.pi/agent/models.json`
 
-Mở (hoặc tạo mới) file `~/.pi/agent/models.json` và thêm provider `deepseek-web-local`:
+Add the `deepseek-web-local` provider to `~/.pi/agent/models.json`:
 
 ```json
 {
@@ -142,9 +142,9 @@ Mở (hoặc tạo mới) file `~/.pi/agent/models.json` và thêm provider `dee
 }
 ```
 
-### 2. Đặt làm Model mặc định trong `~/.pi/agent/settings.json`
+### 2. Set the Default Model in `~/.pi/agent/settings.json`
 
-Cập nhật `~/.pi/agent/settings.json`:
+Update `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -156,34 +156,34 @@ Cập nhật `~/.pi/agent/settings.json`:
 }
 ```
 
-### 3. Sử dụng trong `pi`
+### 3. Usage in `pi`
 
-Kiểm tra danh sách model đã nhận:
+Verify that `pi` recognizes the configured models:
 ```bash
 pi --list-models deepseek
 ```
 
-Khởi chạy `pi` trong thư mục dự án bất kỳ:
+Launch `pi` in any project directory:
 ```bash
 pi
 ```
 
-- **Chuyển đổi giữa các model**: Gõ `/model` hoặc nhấn `Ctrl+P` để đổi giữa:
-  - `deepseek-reasoner`: Bật DeepThink (hiển thị luồng suy nghĩ trực tiếp trên `pi`).
-  - `deepseek-chat`: Tắt DeepThink, tốc độ phản hồi nhanh.
-- **Điều chỉnh mức độ suy nghĩ (`Shift+Tab`)**:
-  - `off`: Tắt hẳn DeepThink ngay trên `deepseek-reasoner`.
-  - `minimal` / `low`: Suy nghĩ ngắn gọn (1–3 câu hoặc <150 từ) rồi gọi tool ngay.
-  - `medium`: Độ sâu suy nghĩ tự nhiên mặc định của DeepSeek Web.
-  - `high` / `xhigh` / `max`: Phân tích sâu kiến trúc và kiểm tra kỹ các edge cases trước khi hành động.
+- **Switch Models**: Type `/model` or press `Ctrl+P` to toggle between:
+  - `deepseek-reasoner`: DeepThink enabled (streams live reasoning thoughts to `pi`).
+  - `deepseek-chat`: DeepThink disabled for fast responses.
+- **Adjust Thinking Level (`Shift+Tab`)**:
+  - `off`: Disables DeepThink on `deepseek-reasoner` (`thinking_enabled: false`).
+  - `minimal` / `low`: Enables DeepThink with concise reasoning (1–3 sentences or <150 words) before acting.
+  - `medium`: Default native DeepThink depth.
+  - `high` / `xhigh` / `max`: Deep architectural and edge-case analysis before executing tools.
 
 ---
 
-## 📊 Thông số giới hạn Context & Modelos hỗ trợ
+## 📊 Context Limits & Supported Models
 
-| Model ID | DeepThink | Web Search | Context Window | Max Output / Lượt |
+| Model ID | DeepThink | Web Search | Context Window | Max Output / Turn |
 | :--- | :---: | :---: | :---: | :---: |
-| `deepseek-reasoner` | ✅ Bật | ❌ Tắt | `131,072` (128K) | `16,384` – `32,768` |
-| `deepseek-chat` | ❌ Tắt | ❌ Tắt | `131,072` (128K) | `8,192` – `16,384` |
-| `deepseek-reasoner-search` | ✅ Bật | ✅ Bật | `131,072` (128K) | `16,384` |
-| `deepseek-chat-search` | ❌ Tắt | ✅ Bật | `131,072` (128K) | `16,384` |
+| `deepseek-reasoner` | ✅ Enabled | ❌ Disabled | `131,072` (128K) | `16,384` – `32,768` |
+| `deepseek-chat` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
+| `deepseek-reasoner-search` | ✅ Enabled | ✅ Enabled | `131,072` (128K) | `16,384` |
+| `deepseek-chat-search` | ❌ Disabled | ✅ Enabled | `131,072` (128K) | `16,384` |
