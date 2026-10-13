@@ -162,8 +162,20 @@ def _msg_text(msg: Dict[str, Any]) -> str:
     elif isinstance(content, list):
         parts = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")))
+            if isinstance(item, dict):
+                itype = item.get("type")
+                if itype == "text":
+                    parts.append(str(item.get("text", "")))
+                elif itype == "tool_use":
+                    tname = item.get("name") or "tool"
+                    targs = item.get("input") or {}
+                    parts.append(f"```tool_call\n{json.dumps([{'name': tname, 'arguments': targs}], ensure_ascii=False)}\n```")
+                elif itype == "tool_result":
+                    tname = item.get("name") or item.get("tool_use_id") or "tool"
+                    tcontent = item.get("content", "")
+                    if isinstance(tcontent, list):
+                        tcontent = " ".join(c.get("text", "") for c in tcontent if isinstance(c, dict) and c.get("type") == "text")
+                    parts.append(f"[TOOL_RESULT ({tname})]\n{tcontent}")
             elif isinstance(item, str):
                 parts.append(item)
         text = "\n".join(parts)
@@ -663,14 +675,43 @@ async def health() -> Dict[str, Any]:
     }
 
 
+KNOWN_MODELS = [
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "deepseek-v3",
+    "deepseek-v3.2",
+    "deepseek-r1",
+    "deepseek-coder",
+    "deepseek-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-chat-search",
+    "deepseek-reasoner-search",
+]
+
+
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models() -> Dict[str, Any]:
     now = int(time.time())
-    models = ["deepseek-chat", "deepseek-reasoner", "deepseek-chat-search", "deepseek-reasoner-search"]
     return {
         "object": "list",
-        "data": [{"id": m, "object": "model", "created": now, "owned_by": "deepseek-web"} for m in models],
+        "data": [{"id": m, "object": "model", "created": now, "owned_by": "deepseek-web"} for m in KNOWN_MODELS],
+    }
+
+
+@app.get("/v1/models/{model_id:path}")
+@app.get("/models/{model_id:path}")
+async def retrieve_model(model_id: str) -> Dict[str, Any]:
+    now = int(time.time())
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": now,
+        "owned_by": "deepseek-web",
+        "permission": [],
+        "root": model_id,
+        "parent": None,
     }
 
 
@@ -686,7 +727,8 @@ REASONING_EFFORT_HINTS: Dict[str, str] = {
 def _resolve_model_flags(model: str, body: Dict[str, Any]) -> Tuple[bool, bool, str]:
     m = (model or "deepseek-chat").lower()
     search = "search" in m
-    if "reasoner" in m or "r1" in m:
+    # Support reasoner, r1, pro, thought keywords as thinking models
+    if any(k in m for k in ("reasoner", "r1", "pro", "thought")):
         thinking = True
     else:
         thinking = False
@@ -697,7 +739,7 @@ def _resolve_model_flags(model: str, body: Dict[str, Any]) -> Tuple[bool, bool, 
         effort_level = effort.lower().strip()
         if effort_level in ("off", "none", "disabled"):
             thinking = False
-        elif "reasoner" in m or "r1" in m:
+        elif any(k in m for k in ("reasoner", "r1", "pro", "thought")):
             thinking = True
     thinking_obj = body.get("thinking")
     if isinstance(thinking_obj, dict):
@@ -843,6 +885,7 @@ def _sse_chunk(
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
+        "system_fingerprint": "fp_deepseek_web",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
     if usage is not None:
@@ -945,6 +988,7 @@ async def _run_buffered_completion(
         "object": "chat.completion",
         "created": created,
         "model": model,
+        "system_fingerprint": "fp_deepseek_web",
         "choices": [{"index": 0, "message": msg_obj, "finish_reason": finish_reason}],
         "usage": {"prompt_tokens": 100, "completion_tokens": out_tokens, "total_tokens": 100 + out_tokens},
     })
@@ -1079,7 +1123,26 @@ def _self_test() -> None:
     _, tcs6 = extract_tool_calls(wrapped_args_reply, has_tools=True, tools=sample_tools)
     assert len(tcs6) == 1 and json.loads(tcs6[0]["function"]["arguments"]) == {"command": "echo ok"}
     assert RATE_LIMIT_RE.search("Tin nhắn quá thường xuyên. Vui lòng thử lại sau.")
-    print("✅ All self-tests passed (SSE parser, Session Chaining, Tool Calling, Rate-Limit Retry)!")
+
+    # Anthropic-style tool blocks parsing (used by DeepSeek Harness / dsh / Cordis sub-agents)
+    anthropic_msg = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "I will inspect files."},
+            {"type": "tool_use", "name": "read", "input": {"path": "package.json"}},
+        ],
+    }
+    parsed_anthropic_text = _msg_text(anthropic_msg)
+    assert '{"name": "read", "arguments": {"path": "package.json"}}' in parsed_anthropic_text
+
+    # Model resolution checks for DeepSeek Harness
+    th_flag, sc_flag, eff = _resolve_model_flags("deepseek-reasoner", {})
+    assert th_flag is True and sc_flag is False
+    th_v4, _, _ = _resolve_model_flags("deepseek-v4-pro", {})
+    assert th_v4 is True
+    th_chat, _, _ = _resolve_model_flags("deepseek-chat", {})
+    assert th_chat is False
+    print("✅ All self-tests passed (SSE parser, Session Chaining, Tool Calling, Rate-Limit Retry, DeepSeek Harness)!")
 
 
 def _cli_ask(prompt: str, model: str = "deepseek-chat") -> None:

@@ -179,11 +179,65 @@ pi
 
 ---
 
+## 🪢 DeepSeek Harness (`dsh`) Integration
+
+[DeepSeek Harness (`@deepseek-ai/dsh`)](https://github.com/deepseek-ai) is the official Cordis-based agent runtime and CLI by DeepSeek AI. You can run `dsh` entirely through your local server without consuming official API credits.
+
+### Method 1: Environment Variables (Quickest)
+
+Export the OpenAI-compatible environment variables before running `dsh`:
+
+```bash
+export DEEPSEEK_BASE_URL="http://127.0.0.1:8765/v1"
+export DEEPSEEK_API_KEY="local"
+export DSH_MODEL="deepseek-reasoner"
+```
+
+Then run `dsh` CLI or web UI:
+```bash
+# Run CLI
+npx @deepseek-ai/dsh
+
+# Or start the web UI
+npx @deepseek-ai/dsh web
+```
+
+### Method 2: Configure `~/.dsh/settings.yaml`
+
+Add the local provider to your DeepSeek Harness configuration:
+
+```yaml
+agent-default-model:
+  provider: deepseek-web-local
+  model: deepseek-reasoner
+
+llm-pi-ai:
+  providers:
+    deepseek-web-local:
+      api: openai-completions
+      baseURL: http://127.0.0.1:8765/v1
+      apiKey: local
+      models:
+        - id: deepseek-reasoner
+          displayName: DeepSeek R1 (Web Local)
+        - id: deepseek-chat
+          displayName: DeepSeek V3 (Web Local)
+        - id: deepseek-v4-pro
+          displayName: DeepSeek V4 Pro (Web Local)
+```
+
+> **Sub-Agent Support**: The server natively handles Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (such as Claude Code, Codex, or custom sub-agents).
+
+---
+
 ## 📊 Context Limits & Supported Models
 
 | Model ID | DeepThink | Web Search | Context Window | Max Output / Turn |
 | :--- | :---: | :---: | :---: | :---: |
-| `deepseek-reasoner` | ✅ Enabled | ❌ Disabled | `131,072` (128K) | `16,384` – `32,768` |
-| `deepseek-chat` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
+| `deepseek-reasoner` / `deepseek-r1` | ✅ Enabled | ❌ Disabled | `131,072` (128K) | `16,384` – `32,768` |
+| `deepseek-chat` / `deepseek-v3` / `deepseek-v3.2` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
+| `deepseek-v4-pro` | ✅ Enabled | ❌ Disabled | `131,072` (128K) | `16,384` – `32,768` |
+| `deepseek-flash` / `deepseek-v4-flash` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
+| `deepseek-coder` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
 | `deepseek-reasoner-search` | ✅ Enabled | ✅ Enabled | `131,072` (128K) | `16,384` |
 | `deepseek-chat-search` | ❌ Disabled | ✅ Enabled | `131,072` (128K) | `16,384` |
