@@ -181,11 +181,11 @@ pi
 
 ## 🪢 DeepSeek Harness (`dsh`) Integration
 
-[DeepSeek Harness (`@deepseek-ai/dsh`)](https://github.com/deepseek-ai) is the official Cordis-based agent runtime and CLI by DeepSeek AI. You can run `dsh` entirely through your local server without consuming official API credits.
+[DeepSeek Harness (`@deepseek-ai/dsh` / `dsh`)](https://github.com/deepseek-ai) is the official Cordis-based agent runtime and CLI by DeepSeek AI. You can run `dsh` entirely through your local server without consuming official API credits.
 
 ### Method 1: Environment Variables (Quickest)
 
-Export the OpenAI-compatible environment variables before running `dsh`:
+Export the OpenAI-compatible environment variables (add them to `~/.zshrc` or `~/.bashrc` for persistence):
 
 ```bash
 export DEEPSEEK_BASE_URL="http://127.0.0.1:8765/v1"
@@ -193,40 +193,58 @@ export DEEPSEEK_API_KEY="local"
 export DSH_MODEL="deepseek-reasoner"
 ```
 
-Then run `dsh` CLI or web UI:
+Then run `dsh` web UI or CLI:
 ```bash
-# Run CLI
-npx @deepseek-ai/dsh
+# Start DeepSeek Harness Web UI
+dsh web
 
-# Or start the web UI
-npx @deepseek-ai/dsh web
+# Or run via npx / CLI
+dsh --profile web
 ```
 
-### Method 2: Configure `~/.dsh/settings.yaml`
+### Method 2: Configure `~/.dsh/profiles/web/cordis.patch.yml`
 
-Add the local provider to your DeepSeek Harness configuration:
+DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordis.patch.yml`. Add the `deepseek-web-local` provider directly to your profile:
 
 ```yaml
-agent-default-model:
-  provider: deepseek-web-local
-  model: deepseek-reasoner
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      deepseek-web-local:
+        displayName: DeepSeek Web Local
+        api: openai-completions
+        baseURL: http://127.0.0.1:8765/v1
+        apiKeyEnv: DEEPSEEK_WEB_LOCAL_KEY
+        models:
+          - id: deepseek-reasoner
+            name: DeepSeek R1 (DeepThink)
+          - id: deepseek-chat
+            name: DeepSeek V3 (Chat)
+          - id: deepseek-v4-pro
+            name: DeepSeek V4 Pro
+          - id: deepseek-reasoner-search
+            name: DeepSeek R1 (Search)
+          - id: deepseek-chat-search
+            name: DeepSeek V3 (Search)
 
-llm-pi-ai:
-  providers:
-    deepseek-web-local:
-      api: openai-completions
-      baseURL: http://127.0.0.1:8765/v1
-      apiKey: local
-      models:
-        - id: deepseek-reasoner
-          displayName: DeepSeek R1 (Web Local)
-        - id: deepseek-chat
-          displayName: DeepSeek V3 (Web Local)
-        - id: deepseek-v4-pro
-          displayName: DeepSeek V4 Pro (Web Local)
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-web-local
+    model: deepseek-reasoner
+    reasoningEffort: high
 ```
 
-> **Sub-Agent Support**: The server natively handles Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (such as Claude Code, Codex, or custom sub-agents).
+And define the API key reference in `~/.dsh/.credentials.yaml`:
+
+```yaml
+version: 1
+refs:
+  DEEPSEEK_WEB_LOCAL_KEY: local
+```
+
+> **Sub-Agent Support**: The server natively parses and transforms Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (such as Claude Code, Codex, or custom sub-agents).
 
 ---
 
