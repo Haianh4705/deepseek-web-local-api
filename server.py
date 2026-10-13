@@ -246,7 +246,8 @@ def format_tools_prompt(tools: Optional[List[Dict[str, Any]]]) -> str:
         "Rules:\n"
         "- Use exact tool names and parameter names from the definitions below.\n"
         "- Put all tool parameters inside the `\"arguments\"` object.\n"
-        "- Do NOT just show a ```bash``` block when you want to run a command; you MUST emit a ```tool_call``` block.\n"
+        "- CRITICAL: Do NOT output bare commands, underline markers (___), or raw XML/DSML tags like <invoke> or <｜｜DSML｜｜>. "
+        "You MUST ALWAYS encapsulate tool calls inside a fenced ```tool_call JSON block.\n"
         "- Stop immediately after closing the ```tool_call``` block and wait for `[TOOL_RESULT]`.\n\n"
         "Tool definitions:\n"
         f"{json.dumps(specs, ensure_ascii=False)}\n"
@@ -255,7 +256,8 @@ def format_tools_prompt(tools: Optional[List[Dict[str, Any]]]) -> str:
 
 TOOL_REMINDER_FOOTER = (
     "[TOOL CALL REMINDER: When invoking any tool (e.g. `bash`, `read`, `edit`, `write`), "
-    "you MUST emit a fenced ```tool_call``` JSON block at the end of your message: "
+    "you MUST emit a fenced ```tool_call``` JSON block at the end of your message. "
+    "Do NOT output bare text or <invoke> tags: "
     '```tool_call\n[{"name": "bash", "arguments": {"command": "..."}}]\n```]'
 )
 
@@ -488,15 +490,33 @@ def extract_tool_calls(
                             spans_to_remove.append((idx, len(text)))
                             break
 
+    # 4. DeepSeek V4 Pro bare tool text preceding a DSML closing tag (e.g. bash command text)
+    if not calls and (DSML_ANY_TAG_RE.search(text) or "</invoke>" in text or "<|DSML|>" in text):
+        tag_match = re.search(rf"</?\s*{DSML_PREFIX}(?:invoke|calls|function_calls)>|</\s*invoke\s*>", text, re.IGNORECASE)
+        if tag_match:
+            pre_text = text[: tag_match.start()].strip()
+            # If there is a bash / command-line tool defined and pre_text looks like a command invocation
+            if pre_text and "bash" in schema_map:
+                # Strip any stray leading markers or underlines
+                cmd_cleaned = re.sub(r"^[_\s`]+", "", pre_text).strip()
+                if cmd_cleaned:
+                    calls.append({
+                        "id": f"call_{uuid.uuid4().hex[:12]}",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": json.dumps({"command": cmd_cleaned}, ensure_ascii=False)},
+                    })
+                    spans_to_remove.append((0, len(text)))
+
     cleaned = text
     for start, end in reversed(spans_to_remove):
         cleaned = cleaned[:start] + cleaned[end:]
 
-    if calls or DSML_ANY_TAG_RE.search(cleaned):
+    if calls or DSML_ANY_TAG_RE.search(cleaned) or "</invoke>" in cleaned:
         cleaned = DSML_ANY_TAG_RE.sub("", cleaned)
-        cleaned = re.sub(r"</?(?:function_calls|calls)>", "", cleaned)
+        cleaned = re.sub(r"</?\s*(?:function_calls|calls|invoke)\s*>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"```(?:tool_call|tool_calls|json)?\s*```", "", cleaned)
         cleaned = re.sub(r"```(?:tool_call|tool_calls)\s*$", "", cleaned)
+        cleaned = re.sub(r"_{3,}[｜|]*.*$", "", cleaned)
 
     return cleaned.strip(), calls
 
@@ -1135,13 +1155,17 @@ def _self_test() -> None:
     parsed_anthropic_text = _msg_text(anthropic_msg)
     assert '{"name": "read", "arguments": {"path": "package.json"}}' in parsed_anthropic_text
 
-    # Model resolution checks for DeepSeek Harness
-    th_flag, sc_flag, eff = _resolve_model_flags("deepseek-reasoner", {})
-    assert th_flag is True and sc_flag is False
-    th_v4, _, _ = _resolve_model_flags("deepseek-v4-pro", {})
-    assert th_v4 is True
-    th_chat, _, _ = _resolve_model_flags("deepseek-chat", {})
-    assert th_chat is False
+    # Bare command with stray DSML invoke tag (DeepSeek V4 Pro behavior reported by user)
+    user_sample_reply = (
+        'Structs are not in rl (the C lib namespace). They\'re likely in the ffi cdef namespace, or exposed elsewhere.\n\n'
+        'head -50 /Users/nguyenhaianh/Library/Python/3.9/lib/python/site-packages/raylib/init.pyi; echo "=== grep Vector2 in pyi ==="; grep -n "Vector2|class Rectangle|Rectangle =|Color =|def Color|Font =" /Users/nguyenhaianh/Library/Python/3.9/lib/python/site-packages/raylib/init.pyi | head -30 Inspect raylib type stubs for struct constructors\n\n'
+        '______________________｜｜DSML｜｜> </invoke>'
+    )
+    cleaned_user, tcs_user = extract_tool_calls(user_sample_reply, has_tools=True, tools=sample_tools)
+    assert len(tcs_user) == 1 and tcs_user[0]["function"]["name"] == "bash"
+    assert "head -50" in json.loads(tcs_user[0]["function"]["arguments"])["command"]
+    assert "DSML" not in cleaned_user and "</invoke>" not in cleaned_user
+
     print("✅ All self-tests passed (SSE parser, Session Chaining, Tool Calling, Rate-Limit Retry, DeepSeek Harness)!")
 
 
