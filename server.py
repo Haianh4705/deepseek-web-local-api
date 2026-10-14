@@ -269,7 +269,7 @@ TOOL_REMINDER_FOOTER = (
 
 DSML_PREFIX = r"(?:[｜|]+\s*DSML\s*[｜|]+\s*)?"
 DSML_ANY_TAG_RE = re.compile(rf"</?\s*[｜|]+\s*DSML\s*[｜|]+[^>]*>", re.DOTALL)
-FENCE_START_RE = re.compile(r"```(tool_call|tool_calls|json)\b[ \t]*\r?\n?", re.IGNORECASE)
+FENCE_START_RE = re.compile(r"```([a-zA-Z0-9_-]*)[ \t]*\r?\n?", re.IGNORECASE)
 XML_INVOKE_RE = re.compile(
     rf"<\s*{DSML_PREFIX}invoke\s+name=[\"']([^\"']+)[\"'][^>]*>(.*?)(?:</\s*{DSML_PREFIX}invoke\s*>|(?=</\s*{DSML_PREFIX}(?:function_calls|calls)\s*>)|$)",
     re.DOTALL,
@@ -373,8 +373,50 @@ def _extract_dsml_params(body: str, expected_types: Dict[str, str]) -> Dict[str,
     return args_dict
 
 
+def _repair_json_brackets(candidate: str) -> Tuple[Optional[Any], int]:
+    """Recovers valid JSON when LLM accidentally emits mismatched or unbalanced closing brackets."""
+    stack: List[str] = []
+    in_string = False
+    escape = False
+    cut_idx = len(candidate)
+    for i, ch in enumerate(candidate):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == "\"":
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if stack and ((ch == "]" and stack[-1] == "[") or (ch == "}" and stack[-1] == "{")):
+                stack.pop()
+                if not stack:
+                    cut_idx = i + 1
+                    try:
+                        return json.loads(candidate[:cut_idx]), cut_idx
+                    except Exception:
+                        pass
+            else:
+                cut_idx = i
+                break
+    if stack:
+        prefix = candidate[:cut_idx].rstrip(" \t\r\n,:")
+        closing = "".join("]" if ch == "[" else "}" for ch in reversed(stack))
+        try:
+            return json.loads(prefix + closing), len(candidate)
+        except Exception:
+            pass
+    return None, 0
+
+
 def _try_parse_json_prefix(sub: str) -> Tuple[Optional[Any], int]:
-    """Parses a JSON array/object from the start of `sub`, handling DSML truncation if needed."""
+    """Parses a JSON array/object from the start of `sub`, handling DSML truncation and bracket repair if needed."""
     stripped = sub.lstrip()
     lead_ws = len(sub) - len(stripped)
     if not stripped or stripped[0] not in "[{":
@@ -384,20 +426,28 @@ def _try_parse_json_prefix(sub: str) -> Tuple[Optional[Any], int]:
         obj, end_rel = decoder.raw_decode(stripped)
         return obj, lead_ws + end_rel
     except Exception:
-        # Cut at first DSML tag or closing fence and attempt bracket repair for truncated JSON
-        dsml_m = DSML_ANY_TAG_RE.search(stripped)
-        candidate = stripped[: dsml_m.start()] if dsml_m else stripped
-        if "```" in candidate:
-            candidate = candidate[: candidate.find("```")]
-        candidate = candidate.strip().rstrip(",")
-        for suffix in ("", "]", "}", "}]", '"}', '"}]', '"}}]'):
-            try:
-                obj = json.loads(candidate + suffix)
-                consumed_rel = dsml_m.start() if dsml_m else len(stripped)
-                return obj, lead_ws + consumed_rel
-            except Exception:
-                continue
-        return None, 0
+        pass
+
+    # Cut at first DSML tag or closing fence and attempt bracket repair for truncated/mismatched JSON
+    dsml_m = DSML_ANY_TAG_RE.search(stripped)
+    candidate = stripped[: dsml_m.start()] if dsml_m else stripped
+    if "```" in candidate:
+        candidate = candidate[: candidate.find("```")]
+    candidate = candidate.strip()
+
+    repaired, consumed = _repair_json_brackets(candidate)
+    if repaired is not None:
+        return repaired, lead_ws + consumed
+
+    candidate_r = candidate.rstrip(",")
+    for suffix in ("", "]", "}", "}]", '"}', '"}]', '"}}]'):
+        try:
+            obj = json.loads(candidate_r + suffix)
+            consumed_rel = dsml_m.start() if dsml_m else len(stripped)
+            return obj, lead_ws + consumed_rel
+        except Exception:
+            continue
+    return None, 0
 
 
 def extract_tool_calls(
@@ -411,18 +461,18 @@ def extract_tool_calls(
     calls: List[Dict[str, Any]] = []
     spans_to_remove: List[Tuple[int, int]] = []
 
-    # 1. Fenced ```tool_call / ```tool_calls / ```json blocks (even if unclosed or hybrid DSML)
+    # 1. Fenced ```tool_call / ```tool_calls / ```json / ``` blocks (even if unclosed or hybrid DSML)
     pos = 0
     while pos < len(text):
         m = FENCE_START_RE.search(text, pos)
         if not m:
             break
-        fence_tag = m.group(1).lower()
+        fence_tag = (m.group(1) or "").lower()
         body_start = m.end()
         parsed, consumed = _try_parse_json_prefix(text[body_start:])
         if parsed is not None:
             items = parsed if isinstance(parsed, list) else [parsed]
-            require_known = fence_tag == "json"
+            require_known = fence_tag not in ("tool_call", "tool_calls")
             normalized = [
                 tc for it in items
                 if (tc := _normalize_json_tool_item(it, schema_map, require_known_name=require_known)) is not None
@@ -458,7 +508,23 @@ def extract_tool_calls(
                 continue
         pos = m.end()
 
-    # 2. Native DeepSeek DSML / XML <invoke name="..."> blocks
+    # 2. Unfenced JSON array or object containing tool calls (e.g. Code block \n\n [{"name": "ask_user_question", ...}])
+    if not calls:
+        for m in re.finditer(r"(?:^|\n)\s*(\[|\{)", text):
+            start_idx = m.start(1)
+            parsed, consumed = _try_parse_json_prefix(text[start_idx:])
+            if parsed is not None:
+                items = parsed if isinstance(parsed, list) else [parsed]
+                normalized = [
+                    tc for it in items
+                    if (tc := _normalize_json_tool_item(it, schema_map, require_known_name=bool(schema_map))) is not None
+                ]
+                if normalized:
+                    calls.extend(normalized)
+                    spans_to_remove.append((start_idx, start_idx + consumed))
+                    break
+
+    # 3. Native DeepSeek DSML / XML <invoke name="..."> blocks
     if not calls:
         for match in XML_INVOKE_RE.finditer(text):
             name = match.group(1).strip()
@@ -476,7 +542,7 @@ def extract_tool_calls(
             })
             spans_to_remove.append((match.start(), match.end()))
 
-    # 3. Unfenced JSON array/object immediately preceding a DSML closing tag
+    # 4. Unfenced JSON array/object immediately preceding a DSML closing tag
     if not calls and DSML_ANY_TAG_RE.search(text):
         dsml_m = DSML_ANY_TAG_RE.search(text)
         if dsml_m:
@@ -496,7 +562,7 @@ def extract_tool_calls(
                             spans_to_remove.append((idx, len(text)))
                             break
 
-    # 4. DeepSeek V4 Pro bare tool text preceding a DSML closing tag (e.g. bash command text)
+    # 5. DeepSeek V4 Pro bare tool text preceding a DSML closing tag (e.g. bash command text)
     if not calls and (DSML_ANY_TAG_RE.search(text) or "</invoke>" in text or "<|DSML|>" in text):
         tag_match = re.search(rf"</?\s*{DSML_PREFIX}(?:invoke|calls|function_calls)>|</\s*invoke\s*>", text, re.IGNORECASE)
         if tag_match:
@@ -523,6 +589,9 @@ def extract_tool_calls(
         cleaned = re.sub(r"```(?:tool_call|tool_calls|json)?\s*```", "", cleaned)
         cleaned = re.sub(r"```(?:tool_call|tool_calls)\s*$", "", cleaned)
         cleaned = re.sub(r"_{3,}[｜|]*.*$", "", cleaned)
+        if calls:
+            cleaned = re.sub(r"^\s*(?:Code\s*block|Tool\s*call|```)?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*(?:Code\s*block|```)\s*$", "", cleaned, flags=re.IGNORECASE)
 
     return cleaned.strip(), calls
 
@@ -822,6 +891,8 @@ async def chat_completions(request: Request):
     model = body.get("model") or "deepseek-chat"
     stream = bool(body.get("stream", False))
     tools = body.get("tools")
+    if not tools and body.get("functions"):
+        tools = [{"type": "function", "function": f} for f in body["functions"]]
     thinking_enabled, search_enabled, effort_level = _resolve_model_flags(model, body)
 
     if not stream:
@@ -1343,6 +1414,18 @@ def _self_test() -> None:
     assert len(tcs_user) == 1 and tcs_user[0]["function"]["name"] == "bash"
     assert "head -50" in json.loads(tcs_user[0]["function"]["arguments"])["command"]
     assert "DSML" not in cleaned_user and "</invoke>" not in cleaned_user
+
+    # DSH interactive question tool (ask_user_question) with mismatched brackets and Code block header
+    dsh_question_reply = (
+        'Code block\n\n'
+        '[{"name": "ask_user_question", "arguments": {"questions": [{"id": "q1_setting", "header": "Cau 1", '
+        '"question": "The gioi game?", "options": [{"label": "Sci-fi", "description": "Good"}]}}]}}]'
+    )
+    dsh_tools = [{"type": "function", "function": {"name": "ask_user_question", "parameters": {}}}]
+    cleaned_q, tcs_q = extract_tool_calls(dsh_question_reply, has_tools=True, tools=dsh_tools)
+    assert len(tcs_q) == 1 and tcs_q[0]["function"]["name"] == "ask_user_question"
+    assert cleaned_q == ""
+    assert "questions" in json.loads(tcs_q[0]["function"]["arguments"])
 
     print("✅ All self-tests passed (SSE parser, Session Chaining, Tool Calling, Rate-Limit Retry, DeepSeek Harness)!")
 
