@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
@@ -803,6 +804,124 @@ async def chat_completions(request: Request):
         _run_streaming_completion(model, messages, tools, thinking_enabled, search_enabled, effort_level),
         media_type="text/event-stream",
     )
+
+
+@app.post("/v1/messages")
+@app.post("/messages")
+@app.post("/anthropic/v1/messages")
+async def anthropic_messages(request: Request):
+    """
+    Anthropic-compatible Messages endpoint.
+    DeepSeek Harness uses this for native web_search (@deepseek-ai/dsh-web-search-deepseek).
+    Always enables web search on DeepSeek Web and returns structured web_search_tool_result content blocks.
+    """
+    if hub.ws is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Chưa kết nối với tab Chrome chat.deepseek.com. Hãy mở https://chat.deepseek.com và bật extension/userscript.",
+        )
+
+    body = await request.json()
+    raw_messages = body.get("messages") or []
+    if not raw_messages:
+        raise HTTPException(status_code=400, detail="messages is required")
+
+    messages = []
+    query = ""
+    for m in raw_messages:
+        role = m.get("role") or "user"
+        content = m.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = []
+            for it in content:
+                if isinstance(it, dict) and it.get("type") == "text":
+                    parts.append(str(it.get("text", "")))
+                elif isinstance(it, str):
+                    parts.append(it)
+            text = "\n".join(parts)
+        if "Perform a web search for the query:" in text:
+            query = text.split("Perform a web search for the query:", 1)[1].strip()
+        messages.append({"role": role, "content": text})
+
+    model = body.get("model") or "deepseek-chat"
+    # Search is always enabled for /messages requests from dsh-web-search-deepseek
+    thinking_enabled = False
+    search_enabled = True
+
+    thinking_buf: List[str] = []
+    content_buf: List[str] = []
+
+    try:
+        async for kind, text in _execute_bridge_turn(messages, None, thinking_enabled, search_enabled, "off"):
+            if kind == "thinking":
+                thinking_buf.append(text)
+            elif kind == "content":
+                content_buf.append(text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    raw_content = "".join(content_buf)
+    cid = f"msg_{uuid.uuid4().hex[:12]}"
+
+    # Extract any markdown links [title](url) as cited web_search_result sources
+    url_re = re.compile(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)")
+    sources = []
+    citations = []
+    seen_urls = set()
+    for m in url_re.finditer(raw_content):
+        title = m.group(1).strip()
+        url = m.group(2).strip()
+        if url not in seen_urls:
+            seen_urls.add(url)
+            sources.append({
+                "type": "web_search_result",
+                "url": url,
+                "title": title,
+                "page_age": "recent",
+            })
+            citations.append({
+                "type": "web_search_result_citation",
+                "url": url,
+                "cited_text": title,
+            })
+
+    if not sources and query:
+        # Fallback dummy search result if DeepSeek returned prose without explicit markdown links
+        sources.append({
+            "type": "web_search_result",
+            "url": f"https://www.google.com/search?q={urllib.parse.quote(query)}",
+            "title": query,
+            "page_age": "recent",
+        })
+
+    response_content = [
+        {
+            "type": "web_search_tool_result",
+            "content": sources,
+        },
+        {
+            "type": "text",
+            "text": raw_content,
+            "citations": citations,
+        },
+    ]
+
+    return JSONResponse({
+        "id": cid,
+        "type": "message",
+        "role": "assistant",
+        "content": response_content,
+        "model": model,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": max(1, len(raw_content) // 4),
+        },
+    })
 
 
 async def _execute_bridge_turn(
