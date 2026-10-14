@@ -628,11 +628,17 @@ class BridgeHub:
         self.ws: Optional[WebSocket] = None
         self.has_token: bool = False
         self.device_id: bool = False
-        self.lock = asyncio.Lock()  # ponytail: single lock serializes requests to the active browser tab
+        self._lock: Optional[asyncio.Lock] = None
         self.queues: Dict[str, asyncio.Queue] = {}
         self.chain = SessionChainManager()
         self.last_turn_end_time: float = 0.0
         self.turn_timestamps: List[float] = []
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def pace_before_turn(self) -> None:
         """Paces rapid multi-step agent turns so DeepSeek Web's burst limiter doesn't trigger."""
