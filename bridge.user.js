@@ -300,8 +300,29 @@
     }
   }
 
+  // Anti-Ban & Subagent Optimization Guard Directive
+  const ANTI_BAN_PROMPT_DIRECTIVE =
+    '\n\n[ANTI-BAN & CONCURRENCY SAFEGUARDS:\n' +
+    '1. Subagent Limit: Never spawn multiple parallel subagents. Prefer completing tasks directly in this session. If delegating to a subagent is strictly required, invoke at most ONE subagent at a time sequentially.\n' +
+    '2. Action Batching: Combine related tool operations and commands into consolidated steps instead of multiple rapid back-and-forth micro-turns.\n' +
+    '3. Search Moderation: Formulate focused, high-precision search queries rather than sending rapid repetitive searches.\n' +
+    '4. Rate Pacing: Provide clear, comprehensive outputs to avoid rapid ping-pong turn loops.]';
+
+  function applyAntiBanSafeguard(promptText) {
+    if (!promptText || typeof promptText !== 'string') return promptText;
+    if (
+      promptText.includes('ANTI-BAN') ||
+      promptText.includes('Subagent Limit') ||
+      promptText.includes('Subagent & Concurrency Policy')
+    ) {
+      return promptText;
+    }
+    return promptText + ANTI_BAN_PROMPT_DIRECTIVE;
+  }
+
   async function runDomCompletion(msg) {
     const { req_id: reqId, prompt, new_chat: newChat } = msg;
+    const promptToSend = applyAntiBanSafeguard(prompt);
     sendLog(reqId, 'Running DOM Mode completion...');
     updateBadge('🔄 DOM Sending...', '#f59e0b');
     if (newChat) {
@@ -312,8 +333,8 @@
     const textarea = document.querySelector('textarea#chat-input, textarea');
     if (!textarea) throw new Error('Cannot find chat input textarea on page');
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-    if (setter) setter.call(textarea, prompt);
-    else textarea.value = prompt;
+    if (setter) setter.call(textarea, promptToSend);
+    else textarea.value = promptToSend;
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     pendingDomReqId = reqId;
     await new Promise((r) => setTimeout(r, 100));
@@ -363,6 +384,8 @@
           sessionId = await createChatSession(controller.signal, reqId);
         }
 
+        const promptToSend = applyAntiBanSafeguard(prompt);
+
         for (let attempt = 0; attempt < 2; attempt++) {
           const powHeader = await createPowHeader('/api/v0/chat/completion', controller.signal, reqId);
           sendLog(reqId, `POST /api/v0/chat/completion (session=${sessionId.slice(0, 8)}, parent=${parentId})...`);
@@ -377,7 +400,7 @@
               body: JSON.stringify({
                 chat_session_id: sessionId,
                 parent_message_id: parentId,
-                prompt,
+                prompt: promptToSend,
                 ref_file_ids: [],
                 thinking_enabled: Boolean(thinkingEnabled),
                 search_enabled: Boolean(searchEnabled),
@@ -489,7 +512,7 @@
         'position:fixed;bottom:14px;right:14px;z-index:999999;padding:6px 12px;border-radius:999px;' +
         'font:600 12px/1.2 -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;cursor:pointer;' +
         'box-shadow:0 2px 10px rgba(0,0,0,0.25);user-select:none;transition:all .2s;';
-      badgeEl.title = 'Click to toggle API Mode / DOM Mode';
+      badgeEl.title = 'DeepSeek Local AI Bridge | Click to toggle API/DOM Mode | 🛡️ Anti-Ban Safeguards Active';
       badgeEl.onclick = () => {
         useDomMode = !useDomMode;
         updateBadge(`🟢 Local AI (${useDomMode ? 'DOM' : 'API'})`, '#10b981');

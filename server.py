@@ -249,6 +249,10 @@ def format_tools_prompt(tools: Optional[List[Dict[str, Any]]]) -> str:
         "- Put all tool parameters inside the `\"arguments\"` object.\n"
         "- CRITICAL: Do NOT output bare commands, underline markers (___), or raw XML/DSML tags like <invoke> or <｜｜DSML｜｜>. "
         "You MUST ALWAYS encapsulate tool calls inside a fenced ```tool_call JSON block.\n"
+        "- Subagent & Anti-Ban Policy: NEVER spawn multiple parallel subagents. Prefer completing tasks directly within this session. "
+        "If delegating subtasks is strictly necessary, invoke at most ONE subagent at a time sequentially to avoid rate-limit bans.\n"
+        "- Action Batching: Group related commands or file operations into consolidated tool calls rather than spamming rapid micro-turns.\n"
+        "- Search Moderation: Formulate focused, high-precision search queries rather than sending rapid repetitive searches.\n"
         "- Stop immediately after closing the ```tool_call``` block and wait for `[TOOL_RESULT]`.\n\n"
         "Tool definitions:\n"
         f"{json.dumps(specs, ensure_ascii=False)}\n"
@@ -258,7 +262,8 @@ def format_tools_prompt(tools: Optional[List[Dict[str, Any]]]) -> str:
 TOOL_REMINDER_FOOTER = (
     "[TOOL CALL REMINDER: When invoking any tool (e.g. `bash`, `read`, `edit`, `write`), "
     "you MUST emit a fenced ```tool_call``` JSON block at the end of your message. "
-    "Do NOT output bare text or <invoke> tags: "
+    "Do NOT output bare text or <invoke> tags. "
+    "To avoid rate-limit bans, do NOT spawn parallel subagents; execute tasks sequentially: "
     '```tool_call\n[{"name": "bash", "arguments": {"command": "..."}}]\n```]'
 )
 
