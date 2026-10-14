@@ -185,10 +185,11 @@ pi
 
 ### Method 1: Environment Variables (Quickest)
 
-Export the OpenAI-compatible environment variables (add them to `~/.zshrc` or `~/.bashrc` for persistence):
+Export the OpenAI- and Anthropic-compatible environment variables (add them to `~/.zshrc` or `~/.bashrc` for persistence):
 
 ```bash
 export DEEPSEEK_BASE_URL="http://127.0.0.1:8765/v1"
+export DEEPSEEK_SEARCH_BASE_URL="http://127.0.0.1:8765/v1"
 export DEEPSEEK_API_KEY="local"
 export DSH_MODEL="deepseek-reasoner"
 ```
@@ -204,7 +205,7 @@ dsh --profile web
 
 ### Method 2: Configure `~/.dsh/profiles/web/cordis.patch.yml`
 
-DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordis.patch.yml`. Add the `deepseek-web-local` provider directly to your profile:
+DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordis.patch.yml`. Add the `deepseek-web-local` provider and `web-search-deepseek` provider directly to your profile:
 
 ```yaml
 - id: llm-pi-ai
@@ -232,19 +233,29 @@ DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordi
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
     provider: deepseek-web-local
-    model: deepseek-reasoner
-    reasoningEffort: high
+    model: deepseek-v4-pro
+
+- id: web-search-deepseek
+  name: "@deepseek-ai/dsh-web-search-deepseek"
+  config:
+    baseURL: http://127.0.0.1:8765/v1
+    apiKeyEnv: DEEPSEEK_API_KEY
 ```
 
-And define the API key reference in `~/.dsh/.credentials.yaml`:
+And define the API key references in `~/.dsh/.credentials.yaml`:
 
 ```yaml
 version: 1
 refs:
   DEEPSEEK_WEB_LOCAL_KEY: local
+  DEEPSEEK_API_KEY: local
+  OPENAI_API_KEY: local
+  ANTHROPIC_API_KEY: local
 ```
 
-> **Sub-Agent Support**: The server natively parses and transforms Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (such as Claude Code, Codex, or custom sub-agents).
+> **Native Web Search & Sub-Agent Support**:
+> - **Zero-Cost Web Search**: Native `web_search` and `web_fetch` in `dsh` route to the local server's `/v1/messages` endpoint with in-browser DeepSeek Web Search enabled without requiring official API credits.
+> - **Sub-Agent Delegation**: Natively parses Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (Claude Code, Codex, research sub-agents) with concurrency isolation.
 
 ---
 
