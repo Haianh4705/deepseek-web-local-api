@@ -255,7 +255,7 @@ refs:
 
 > **Native Web Search & Sub-Agent Support**:
 > - **Zero-Cost Web Search**: Native `web_search` and `web_fetch` in `dsh` route to the local server's `/v1/messages` endpoint with in-browser DeepSeek Web Search enabled without requiring official API credits.
-> - **Sub-Agent Delegation**: Natively parses Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness agents (Claude Code, Codex, research sub-agents) with concurrency isolation.
+> - **Sub-Agent Delegation & Multi-Agent Concurrency**: Natively parses Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness sub-agents. Requests from parallel subagents are serialized via async queue locks, dynamically paced (2.8s–6.0s adaptive spacing based on request velocity), and protected with multi-tier exponential backoff (6s–60s) and global session cooldowns to completely prevent DeepSeek Web burst rate-limiting (`"Tin nhắn quá thường xuyên. Vui lòng thử lại sau."`).
 
 ---
 

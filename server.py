@@ -634,6 +634,7 @@ class BridgeHub:
         self.chain = SessionChainManager()
         self.last_turn_end_time: float = 0.0
         self.turn_timestamps: List[float] = []
+        self.cooldown_until: float = 0.0
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -641,20 +642,39 @@ class BridgeHub:
             self._lock = asyncio.Lock()
         return self._lock
 
+    def trigger_cooldown(self, wait_seconds: float) -> None:
+        """Sets a global cooldown timestamp to shield all waiting subagents from burst limiter."""
+        target = time.time() + wait_seconds
+        if target > self.cooldown_until:
+            self.cooldown_until = target
+
     async def pace_before_turn(self) -> None:
         """Paces rapid multi-step agent turns so DeepSeek Web's burst limiter doesn't trigger."""
         now = time.time()
+        # Respect global rate-limit cooldown across all subagents
+        if self.cooldown_until > now:
+            cooldown_wait = self.cooldown_until - now
+            print(f"[Local-AI] ⏳ Waiting {cooldown_wait:.1f}s for global rate-limit cooldown to expire...", flush=True)
+            await asyncio.sleep(cooldown_wait)
+            now = time.time()
+
         self.turn_timestamps = [t for t in self.turn_timestamps if now - t < 60.0]
-        min_gap = 2.4
-        if len(self.turn_timestamps) >= 8:
-            min_gap = 4.2
-        elif len(self.turn_timestamps) >= 5:
-            min_gap = 3.2
+        # When subagents run concurrently, increase spacing to avoid DeepSeek IP/session burst limiter
+        n_recent = len(self.turn_timestamps)
+        if n_recent >= 12:
+            min_gap = 6.0
+        elif n_recent >= 8:
+            min_gap = 4.8
+        elif n_recent >= 4:
+            min_gap = 3.8
+        else:
+            min_gap = 2.8
+
         if self.last_turn_end_time > 0:
             elapsed = now - self.last_turn_end_time
             if elapsed < min_gap:
                 wait_s = min_gap - elapsed
-                print(f"[Local-AI] ⏱️ Pacing {wait_s:.1f}s between rapid agent turns...", flush=True)
+                print(f"[Local-AI] ⏱️ Pacing {wait_s:.1f}s between rapid agent turns ({n_recent} reqs/min)...", flush=True)
                 await asyncio.sleep(wait_s)
         self.turn_timestamps.append(time.time())
 
@@ -942,7 +962,7 @@ async def _execute_bridge_turn(
             flush=True,
         )
 
-        backoff_schedule = [5.0, 10.0, 16.0, 24.0, 35.0]
+        backoff_schedule = [6.0, 12.0, 20.0, 30.0, 45.0, 60.0]
         max_attempts = len(backoff_schedule) + 1
 
         for attempt in range(max_attempts):
@@ -1005,12 +1025,24 @@ async def _execute_bridge_turn(
                 err_str = str(err)
                 if attempt < len(backoff_schedule) and not full_reply_parts and RATE_LIMIT_RE.search(err_str):
                     wait_s = backoff_schedule[attempt]
+                    # Also notify global hub cooldown so queued subagents waiting for hub.lock don't burst immediately
+                    hub.trigger_cooldown(wait_s)
                     print(
                         f"[Local-AI] ⏳ DeepSeek rate-limit ({err_str!r}), tự động chờ {wait_s:.0f}s rồi gửi lại "
                         f"({attempt + 1}/{len(backoff_schedule)})...",
                         flush=True,
                     )
                     await asyncio.sleep(wait_s)
+
+                    # If repeatedly hitting rate-limit in an existing session, reset session to avoid stuck/poisoned chats
+                    if attempt >= 1 and (session_id is not None or parent_id is not None):
+                        print("[Local-AI] 🔄 Resetting chained session to root after rate-limit backoff...", flush=True)
+                        session_id = None
+                        parent_id = None
+                        tools_block = format_tools_prompt(tools)
+                        prompt = hub.chain._format_entries(norm_msgs, tools_block=tools_block, has_tools=bool(tools))
+                        if thinking_enabled and effort_level in REASONING_EFFORT_HINTS:
+                            prompt = f"{prompt}\n\n{REASONING_EFFORT_HINTS[effort_level]}"
                     continue
                 raise
             finally:
