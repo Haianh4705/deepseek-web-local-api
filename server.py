@@ -596,56 +596,66 @@ def extract_tool_calls(
     return cleaned.strip(), calls
 
 
+class SessionState:
+    def __init__(self, session_id: str, last_response_id: Optional[int], synced_messages: List[Tuple[str, str]]):
+        self.session_id = session_id
+        self.last_response_id = last_response_id
+        self.synced_messages = synced_messages
+        self.turns_in_session = 1
+        self.last_used = time.time()
+
+
 class SessionChainManager:
     """
-    Tracks active DeepSeek chat_session_id and parent_message_id so multi-step coding agents
-    only send the incremental delta prompt on continuation turns.
+    Tracks active DeepSeek chat_session_id and parent_message_id across multiple concurrent subagents
+    so each subagent reuses its own chat session instead of triggering rapid session-creation bans.
     """
 
     def __init__(self) -> None:
-        self.session_id: Optional[str] = None
-        self.turns_in_session: int = 0
-        self.last_response_id: Optional[int] = None
-        self.synced_messages: List[Tuple[str, str]] = []  # [(role, text), ...]
+        self.sessions: Dict[str, SessionState] = {}  # session_id -> SessionState
+        self.active_session_id: Optional[str] = None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self.active_session_id
+
+    @property
+    def turns_in_session(self) -> int:
+        s = self.sessions.get(self.active_session_id) if self.active_session_id else None
+        return s.turns_in_session if s else 0
 
     def prepare_turn(
         self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[Optional[str], Optional[int], str, List[Tuple[str, str]]]:
         norm: List[Tuple[str, str]] = [(_norm_role(m.get("role")), _msg_text(m)) for m in messages]
 
-        if self.turns_in_session >= 40:
-            self.session_id = None
-            self.turns_in_session = 0
-            self.last_response_id = None
-            self.synced_messages = []
+        # 1. Search existing sessions to find matching conversation branch (reused across subagents)
+        best_session: Optional[SessionState] = None
+        for s in self.sessions.values():
+            if s.turns_in_session >= 40:
+                continue
+            if s.last_response_id is not None and len(s.synced_messages) > 0 and len(norm) > len(s.synced_messages):
+                match = True
+                for i, (r_old, t_old) in enumerate(s.synced_messages):
+                    r_new, t_new = norm[i]
+                    if r_old != r_new or (r_old != "assistant" and t_old != t_new):
+                        match = False
+                        break
+                if match:
+                    if best_session is None or len(s.synced_messages) > len(best_session.synced_messages):
+                        best_session = s
 
-        can_chain = (
-            self.session_id is not None
-            and self.last_response_id is not None
-            and len(self.synced_messages) > 0
-            and len(norm) > len(self.synced_messages)
-        )
-        if can_chain:
-            for i, (r_old, t_old) in enumerate(self.synced_messages):
-                r_new, t_new = norm[i]
-                if r_old != r_new:
-                    can_chain = False
-                    break
-                if r_old != "assistant" and t_old != t_new:
-                    can_chain = False
-                    break
-
-        if can_chain:
-            delta = norm[len(self.synced_messages) :]
+        if best_session is not None:
+            self.active_session_id = best_session.session_id
+            delta = norm[len(best_session.synced_messages) :]
             if delta and delta[0][0] == "assistant":
                 delta = delta[1:]
             if delta:
                 prompt = self._format_entries(delta, tools_block="", has_tools=bool(tools))
-                return self.session_id, self.last_response_id, prompt, norm
+                return best_session.session_id, best_session.last_response_id, prompt, norm
 
-        self.session_id = None
-        self.turns_in_session = 0
-        self.last_response_id = None
+        # 2. No matching session found -> Start new chat session
+        self.active_session_id = None
         tools_block = format_tools_prompt(tools)
         prompt = self._format_entries(norm, tools_block=tools_block, has_tools=bool(tools))
         return None, None, prompt, norm
@@ -683,11 +693,21 @@ class SessionChainManager:
         norm_messages: List[Tuple[str, str]],
         assistant_reply: str,
     ) -> None:
-        if session_id:
-            self.session_id = session_id
-            self.turns_in_session += 1
-        self.last_response_id = response_message_id
-        self.synced_messages = list(norm_messages) + [("assistant", assistant_reply)]
+        if not session_id:
+            return
+        self.active_session_id = session_id
+        synced = list(norm_messages) + [("assistant", assistant_reply)]
+        if session_id in self.sessions:
+            s = self.sessions[session_id]
+            s.last_response_id = response_message_id
+            s.synced_messages = synced
+            s.turns_in_session += 1
+            s.last_used = time.time()
+        else:
+            self.sessions[session_id] = SessionState(session_id, response_message_id, synced)
+            if len(self.sessions) > 20:
+                oldest_id = min(self.sessions, key=lambda k: self.sessions[k].last_used)
+                self.sessions.pop(oldest_id, None)
 
 
 # ── 3. WebSocket Bridge Hub & OpenAI HTTP Routes ─────────────────────────────

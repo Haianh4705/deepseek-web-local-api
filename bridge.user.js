@@ -528,5 +528,15 @@
   } else {
     updateBadge(lastBadgeState.text, lastBadgeState.color);
   }
+
+  // Simulates benign user presence every 30s so anti-bot sensor (SMSdk) does not flag dead automated headless tabs
+  setInterval(() => {
+    try {
+      if (document.body) {
+        window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 100, clientY: 100 }));
+      }
+    } catch {}
+  }, 30000);
+
   connectWs();
 })();
