@@ -635,6 +635,7 @@ class BridgeHub:
         self.last_turn_end_time: float = 0.0
         self.turn_timestamps: List[float] = []
         self.cooldown_until: float = 0.0
+        self.waiting_count: int = 0
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -719,6 +720,7 @@ async def health() -> Dict[str, Any]:
         "authenticated": hub.has_token,
         "session_id": hub.chain.session_id,
         "turns_in_session": hub.chain.turns_in_session,
+        "queue_waiting": hub.waiting_count,
     }
 
 
@@ -951,16 +953,27 @@ async def _execute_bridge_turn(
     search_enabled: bool,
     effort_level: str = "medium",
 ) -> AsyncGenerator[Tuple[str, str], None]:
-    async with hub.lock:
-        await hub.pace_before_turn()
-        session_id, parent_id, prompt, norm_msgs = hub.chain.prepare_turn(messages, tools)
-        if thinking_enabled and effort_level in REASONING_EFFORT_HINTS:
-            prompt = f"{prompt}\n\n{REASONING_EFFORT_HINTS[effort_level]}"
-        mode_tag = f"CHAIN(parent={parent_id})" if parent_id else "ROOT"
+    hub.waiting_count += 1
+    if hub.waiting_count > 1:
         print(
-            f"[Local-AI] -> {mode_tag} | think={thinking_enabled}({effort_level}) | chars={len(prompt)}",
+            f"[Local-AI] 📥 Đưa request vào hàng đợi (vị trí #{hub.waiting_count}, đang xếp hàng chờ gửi dần)...",
             flush=True,
         )
+
+    lock_acquired = False
+    try:
+        async with hub.lock:
+            lock_acquired = True
+            hub.waiting_count = max(0, hub.waiting_count - 1)
+            await hub.pace_before_turn()
+            session_id, parent_id, prompt, norm_msgs = hub.chain.prepare_turn(messages, tools)
+            if thinking_enabled and effort_level in REASONING_EFFORT_HINTS:
+                prompt = f"{prompt}\n\n{REASONING_EFFORT_HINTS[effort_level]}"
+            mode_tag = f"CHAIN(parent={parent_id})" if parent_id else "ROOT"
+            print(
+                f"[Local-AI] -> {mode_tag} | think={thinking_enabled}({effort_level}) | chars={len(prompt)}",
+                flush=True,
+            )
 
         backoff_schedule = [6.0, 12.0, 20.0, 30.0, 45.0, 60.0]
         max_attempts = len(backoff_schedule) + 1
@@ -1047,6 +1060,9 @@ async def _execute_bridge_turn(
                 raise
             finally:
                 hub.queues.pop(req_id, None)
+    finally:
+        if not lock_acquired:
+            hub.waiting_count = max(0, hub.waiting_count - 1)
 
 
 def _sse_chunk(
