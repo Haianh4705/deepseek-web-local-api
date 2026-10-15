@@ -6,6 +6,8 @@ Connects to an open chat.deepseek.com tab running bridge.user.js over WebSocket.
 import asyncio
 import json
 import re
+import os
+import signal
 import sys
 import time
 import urllib.parse
@@ -713,7 +715,9 @@ class SessionChainManager:
 # ── 3. WebSocket Bridge Hub & OpenAI HTTP Routes ─────────────────────────────
 
 RATE_LIMIT_RE = re.compile(
-    r"thường xuyên|thử lại sau|quá tải|frequent|too many|rate limit|try again later|频繁|稍后再试|busy|429",
+    r"thường xuyên|thử lại sau|quá tải|frequent|too many|rate limit|try again later|"
+    r"temporarily unavailable|unavailable|busy|overloaded|service unavailable|"
+    r"频繁|稍后再试|繁忙|不可用|429|503|502|504",
     re.IGNORECASE,
 )
 
@@ -816,6 +820,23 @@ async def health() -> Dict[str, Any]:
         "turns_in_session": hub.chain.turns_in_session,
         "queue_waiting": hub.waiting_count,
     }
+
+
+@app.post("/eval")
+async def eval_js(req: Request) -> Dict[str, Any]:
+    if not hub.ws:
+        raise HTTPException(status_code=503, detail="Bridge WebSocket not connected")
+    data = await req.json()
+    code = data.get("code", "")
+    req_id = uuid.uuid4().hex
+    q: asyncio.Queue = asyncio.Queue()
+    hub.queues[req_id] = q
+    try:
+        await hub.ws.send_text(json.dumps({"type": "eval", "id": req_id, "code": code}))
+        res = await asyncio.wait_for(q.get(), timeout=10.0)
+        return res
+    finally:
+        hub.queues.pop(req_id, None)
 
 
 KNOWN_MODELS = [
@@ -1071,91 +1092,98 @@ async def _execute_bridge_turn(
                 flush=True,
             )
 
-        backoff_schedule = [6.0, 12.0, 20.0, 30.0, 45.0, 60.0]
-        max_attempts = len(backoff_schedule) + 1
+            backoff_schedule = [6.0, 12.0, 20.0, 30.0, 45.0, 60.0]
+            max_attempts = len(backoff_schedule) + 1
 
-        for attempt in range(max_attempts):
-            req_id = uuid.uuid4().hex
-            q: asyncio.Queue = asyncio.Queue()
-            hub.queues[req_id] = q
-            parser = DeepSeekSseParser()
-            full_reply_parts: List[str] = []
+            for attempt in range(max_attempts):
+                req_id = uuid.uuid4().hex
+                q: asyncio.Queue = asyncio.Queue()
+                hub.queues[req_id] = q
+                parser = DeepSeekSseParser()
+                full_reply_parts: List[str] = []
+                completed_normally = False
 
-            try:
-                await hub.ws.send_text(
-                    json.dumps({
-                        "type": "completion",
-                        "req_id": req_id,
-                        "prompt": prompt,
-                        "session_id": session_id,
-                        "parent_message_id": parent_id,
-                        "thinking_enabled": thinking_enabled,
-                        "search_enabled": search_enabled,
-                        "new_chat": parent_id is None and session_id is None,
-                    })
-                )
-
-                while True:
-                    msg = await asyncio.wait_for(q.get(), timeout=180.0)
-                    mtype = msg.get("type")
-                    if msg.get("session_id"):
-                        parser.session_id = msg["session_id"]
-                        if session_id is None:
-                            session_id = msg["session_id"]
-                    if mtype == "sse_lines":
-                        events = parser.feed_lines(msg.get("lines") or [])
-                        for kind, text in events:
-                            if kind == "error":
-                                raise RuntimeError(text)
-                            if kind == "content":
-                                full_reply_parts.append(text)
-                            yield kind, text
-                    elif mtype == "error":
-                        raise RuntimeError(msg.get("message") or "Unknown browser bridge error")
-                    elif mtype == "done":
-                        for kind, text in parser._flush_event():
-                            if kind == "error":
-                                raise RuntimeError(text)
-                            if kind == "content":
-                                full_reply_parts.append(text)
-                            yield kind, text
-                        break
-
-                hub.record_turn_end()
-                hub.chain.commit_turn(
-                    parser.session_id or session_id,
-                    parser.response_message_id,
-                    norm_msgs,
-                    "".join(full_reply_parts),
-                )
-                return
-            except Exception as err:
-                hub.record_turn_end()
-                err_str = str(err)
-                if attempt < len(backoff_schedule) and not full_reply_parts and RATE_LIMIT_RE.search(err_str):
-                    wait_s = backoff_schedule[attempt]
-                    # Also notify global hub cooldown so queued subagents waiting for hub.lock don't burst immediately
-                    hub.trigger_cooldown(wait_s)
-                    print(
-                        f"[Local-AI] ⏳ DeepSeek rate-limit ({err_str!r}), tự động chờ {wait_s:.0f}s rồi gửi lại "
-                        f"({attempt + 1}/{len(backoff_schedule)})...",
-                        flush=True,
+                try:
+                    await hub.ws.send_text(
+                        json.dumps({
+                            "type": "completion",
+                            "req_id": req_id,
+                            "prompt": prompt,
+                            "session_id": session_id,
+                            "parent_message_id": parent_id,
+                            "thinking_enabled": thinking_enabled,
+                            "search_enabled": search_enabled,
+                            "new_chat": parent_id is None and session_id is None,
+                        })
                     )
-                    await asyncio.sleep(wait_s)
 
-                    # If repeatedly hitting rate-limit in an existing session, reset session to avoid stuck/poisoned chats
-                    if attempt >= 1 and (session_id is not None or parent_id is not None):
-                        print("[Local-AI] 🔄 Resetting chained session to root after rate-limit backoff...", flush=True)
-                        session_id = None
-                        parent_id = None
-                        tools_block = format_tools_prompt(tools)
-                        prompt = hub.chain._format_entries(norm_msgs, tools_block=tools_block, has_tools=bool(tools))
-                        if thinking_enabled and effort_level in REASONING_EFFORT_HINTS:
-                            prompt = f"{prompt}\n\n{REASONING_EFFORT_HINTS[effort_level]}"
-                    continue
-                raise
-            finally:
-                hub.queues.pop(req_id, None)
+                    while True:
+                        msg = await asyncio.wait_for(q.get(), timeout=180.0)
+                        mtype = msg.get("type")
+                        if msg.get("session_id"):
+                            parser.session_id = msg["session_id"]
+                            if session_id is None:
+                                session_id = msg["session_id"]
+                        if mtype == "sse_lines":
+                            events = parser.feed_lines(msg.get("lines") or [])
+                            for kind, text in events:
+                                if kind == "error":
+                                    raise RuntimeError(text)
+                                if kind == "content":
+                                    full_reply_parts.append(text)
+                                yield kind, text
+                        elif mtype == "error":
+                            raise RuntimeError(msg.get("message") or "Unknown browser bridge error")
+                        elif mtype == "done":
+                            for kind, text in parser._flush_event():
+                                if kind == "error":
+                                    raise RuntimeError(text)
+                                if kind == "content":
+                                    full_reply_parts.append(text)
+                                yield kind, text
+                            completed_normally = True
+                            break
+
+                    hub.record_turn_end()
+                    hub.chain.commit_turn(
+                        parser.session_id or session_id,
+                        parser.response_message_id,
+                        norm_msgs,
+                        "".join(full_reply_parts),
+                    )
+                    return
+                except Exception as err:
+                    hub.record_turn_end()
+                    err_str = str(err)
+                    if attempt < len(backoff_schedule) and not full_reply_parts and RATE_LIMIT_RE.search(err_str):
+                        wait_s = backoff_schedule[attempt]
+                        # Also notify global hub cooldown so queued subagents waiting for hub.lock don't burst immediately
+                        hub.trigger_cooldown(wait_s)
+                        print(
+                            f"[Local-AI] ⏳ DeepSeek rate-limit ({err_str!r}), tự động chờ {wait_s:.0f}s rồi gửi lại "
+                            f"({attempt + 1}/{len(backoff_schedule)})...",
+                            flush=True,
+                        )
+                        await asyncio.sleep(wait_s)
+
+                        # If repeatedly hitting rate-limit in an existing session, reset session to avoid stuck/poisoned chats
+                        if attempt >= 1 and (session_id is not None or parent_id is not None):
+                            print("[Local-AI] 🔄 Resetting chained session to root after rate-limit backoff...", flush=True)
+                            session_id = None
+                            parent_id = None
+                            tools_block = format_tools_prompt(tools)
+                            prompt = hub.chain._format_entries(norm_msgs, tools_block=tools_block, has_tools=bool(tools))
+                            if thinking_enabled and effort_level in REASONING_EFFORT_HINTS:
+                                prompt = f"{prompt}\n\n{REASONING_EFFORT_HINTS[effort_level]}"
+                        continue
+                    raise
+                finally:
+                    hub.queues.pop(req_id, None)
+                    if not completed_normally and hub.ws:
+                        try:
+                            await hub.ws.send_text(json.dumps({"type": "abort", "req_id": req_id}))
+                        except Exception:
+                            pass
     finally:
         if not lock_acquired:
             hub.waiting_count = max(0, hub.waiting_count - 1)
@@ -1412,6 +1440,7 @@ def _self_test() -> None:
     _, tcs6 = extract_tool_calls(wrapped_args_reply, has_tools=True, tools=sample_tools)
     assert len(tcs6) == 1 and json.loads(tcs6[0]["function"]["arguments"]) == {"command": "echo ok"}
     assert RATE_LIMIT_RE.search("Tin nhắn quá thường xuyên. Vui lòng thử lại sau.")
+    assert RATE_LIMIT_RE.search("Server is temporarily unavailable.")
 
     # Anthropic-style tool blocks parsing (used by DeepSeek Harness / dsh / Cordis sub-agents)
     anthropic_msg = {
@@ -1483,7 +1512,7 @@ def _kill_existing_server(port: int = PORT) -> None:
     import subprocess
     import socket
     try:
-        out = subprocess.check_output(["lsof", "-ti", f":{port}"]).decode().strip()
+        out = subprocess.check_output(["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]).decode().strip()
         pids = [int(p) for p in out.splitlines() if p.strip()]
         my_pid = os.getpid()
         for pid in pids:
@@ -1493,13 +1522,13 @@ def _kill_existing_server(port: int = PORT) -> None:
     except Exception:
         pass
 
-    for _ in range(25):
+    for _ in range(30):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         in_use = (s.connect_ex(("127.0.0.1", port)) == 0)
         s.close()
         if not in_use:
             break
-        time.sleep(0.2)
+        time.sleep(0.15)
 
 
 if __name__ == "__main__":
@@ -1512,20 +1541,20 @@ if __name__ == "__main__":
         _cli_ask(q)
         sys.exit(0)
 
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    is_in_use = (s.connect_ex(("127.0.0.1", PORT)) == 0)
-    s.close()
-    if is_in_use:
-        if "--restart" in sys.argv:
-            _kill_existing_server(PORT)
-        else:
+    if "--restart" in sys.argv:
+        _kill_existing_server(PORT)
+    else:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        is_in_use = (s.connect_ex(("127.0.0.1", PORT)) == 0)
+        s.close()
+        if is_in_use:
             print(
                 f"\n⚠️  Port {PORT} đang được sử dụng bởi một tiến trình server chạy ngầm!\n"
                 f"👉 Để khởi động lại server, bạn hãy chạy:\n"
                 f"    python3 server.py --restart\n"
                 f"👉 Hoặc tắt tiến trình cũ bằng lệnh:\n"
-                f"    lsof -ti :{PORT} | xargs kill -9\n",
+                f"    lsof -iTCP:{PORT} -sTCP:LISTEN -t | xargs kill -9\n",
                 flush=True,
             )
             sys.exit(1)

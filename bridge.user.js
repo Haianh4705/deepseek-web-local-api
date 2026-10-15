@@ -18,7 +18,7 @@
 
   let ws = null;
   let useDomMode = false;
-  let activeAbort = null;
+  const activeControllers = new Map();
   let pendingDomReqId = null;
   let wasmModulePromise = null;
   let resolvedWasmUrl = null;
@@ -114,6 +114,26 @@
       }
     } catch {}
     return null;
+  }
+
+  function getSseHeaders() {
+    try {
+      let rRequire = null;
+      if (window.rspackChunk_deepseek_chat) {
+        window.rspackChunk_deepseek_chat.push([
+          ['leim_' + Math.random()],
+          {},
+          (r) => { rRequire = r; },
+        ]);
+      }
+      if (rRequire) {
+        const eu = rRequire(54906);
+        if (eu && eu.Ax && typeof eu.Ax().addSSEHeader === 'function') {
+          return eu.Ax().addSSEHeader() || {};
+        }
+      }
+    } catch {}
+    return {};
   }
 
   function buildHeaders(extra = {}) {
@@ -369,11 +389,8 @@
         return;
       }
 
-      if (activeAbort) {
-        try { activeAbort.abort(); } catch {}
-      }
       const controller = new AbortController();
-      activeAbort = controller;
+      activeControllers.set(reqId, controller);
       updateBadge('⚡ Generating...', '#3b82f6');
 
       let sessionId = requestedSessionId || null;
@@ -396,6 +413,7 @@
               headers: buildHeaders({
                 accept: 'text/event-stream',
                 'x-ds-pow-response': powHeader,
+                ...getSseHeaders(),
               }),
               body: JSON.stringify({
                 chat_session_id: sessionId,
@@ -432,10 +450,16 @@
           await streamResponseToWs(reqId, resp.body, sessionId);
           break;
         }
-        updateBadge(`🟢 Local AI (${useDomMode ? 'DOM' : 'API'})`, '#10b981');
       } catch (innerErr) {
-        sendLog(reqId, `Error: ${innerErr?.message || innerErr}`);
-        sendWs({ type: 'error', req_id: reqId, session_id: sessionId, message: String(innerErr?.message || innerErr) });
+        if (controller.signal.aborted) {
+          sendLog(reqId, 'Request cancelled/aborted.');
+          sendWs({ type: 'error', req_id: reqId, session_id: sessionId, message: 'Request aborted' });
+        } else {
+          sendLog(reqId, `Error: ${innerErr?.message || innerErr}`);
+          sendWs({ type: 'error', req_id: reqId, session_id: sessionId, message: String(innerErr?.message || innerErr) });
+        }
+      } finally {
+        activeControllers.delete(reqId);
         updateBadge(`🟢 Local AI (${useDomMode ? 'DOM' : 'API'})`, '#10b981');
       }
     } catch (err) {
@@ -472,8 +496,16 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === 'completion') {
             handleCompletion(msg);
-          } else if (msg.type === 'abort' && activeAbort) {
-            activeAbort.abort();
+          } else if (msg.type === 'abort') {
+            if (msg.req_id && activeControllers.has(msg.req_id)) {
+              try { activeControllers.get(msg.req_id).abort(); } catch {}
+              activeControllers.delete(msg.req_id);
+            } else if (!msg.req_id) {
+              for (const c of activeControllers.values()) {
+                try { c.abort(); } catch {}
+              }
+              activeControllers.clear();
+            }
           } else if (msg.type === 'ping') {
             sendWs({ type: 'pong', has_token: Boolean(getAuthToken()) });
           } else if (msg.type === 'eval') {
@@ -489,6 +521,10 @@
         }
       };
       ws.onclose = () => {
+        for (const c of activeControllers.values()) {
+          try { c.abort(); } catch {}
+        }
+        activeControllers.clear();
         updateBadge('⚪ Server Offline (8765)', '#6b7280');
         setTimeout(connectWs, 2000);
       };
