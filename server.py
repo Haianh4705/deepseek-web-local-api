@@ -1479,6 +1479,29 @@ def _cli_ask(prompt: str, model: str = "deepseek-chat") -> None:
     print()
 
 
+def _kill_existing_server(port: int = PORT) -> None:
+    import subprocess
+    import socket
+    try:
+        out = subprocess.check_output(["lsof", "-ti", f":{port}"]).decode().strip()
+        pids = [int(p) for p in out.splitlines() if p.strip()]
+        my_pid = os.getpid()
+        for pid in pids:
+            if pid != my_pid:
+                os.kill(pid, signal.SIGKILL)
+                print(f"[Local-AI] 🛑 Đã dừng tiến trình server cũ (PID {pid})", flush=True)
+    except Exception:
+        pass
+
+    for _ in range(25):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        in_use = (s.connect_ex(("127.0.0.1", port)) == 0)
+        s.close()
+        if not in_use:
+            break
+        time.sleep(0.2)
+
+
 if __name__ == "__main__":
     if "--test" in sys.argv:
         _self_test()
@@ -1488,5 +1511,24 @@ if __name__ == "__main__":
         q = " ".join(sys.argv[idx + 1 :]) or "Hello!"
         _cli_ask(q)
         sys.exit(0)
+
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    is_in_use = (s.connect_ex(("127.0.0.1", PORT)) == 0)
+    s.close()
+    if is_in_use:
+        if "--restart" in sys.argv:
+            _kill_existing_server(PORT)
+        else:
+            print(
+                f"\n⚠️  Port {PORT} đang được sử dụng bởi một tiến trình server chạy ngầm!\n"
+                f"👉 Để khởi động lại server, bạn hãy chạy:\n"
+                f"    python3 server.py --restart\n"
+                f"👉 Hoặc tắt tiến trình cũ bằng lệnh:\n"
+                f"    lsof -ti :{PORT} | xargs kill -9\n",
+                flush=True,
+            )
+            sys.exit(1)
+
     print(f"🚀 DeepSeek Web Local AI Server running at http://127.0.0.1:{PORT}/v1")
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
