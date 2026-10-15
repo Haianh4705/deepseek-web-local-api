@@ -1,22 +1,35 @@
 # DeepSeek Web Local API (`deepseek-web-local-api`)
 
-Turn an active **DeepSeek Web (`https://chat.deepseek.com`)** browser session into a **Local OpenAI-Compatible API Server (`http://127.0.0.1:8765/v1`)** purpose-built for **Pigent (`pi` coding agent)** and other AI coding assistants.
+Turn an active **DeepSeek Web (`https://chat.deepseek.com`)** browser session into a **Local OpenAI-Compatible API Server (`http://127.0.0.1:8765/v1`)** purpose-built for **DeepSeek Harness (`dsh`)**, **Pigent (`pi` coding agent)**, and other agentic coding assistants.
 
 ---
 
 ## ✨ Key Features
 
-- **OpenAI `/v1/chat/completions` Compatible**: Supports both `stream: true` and `stream: false`, streaming live `reasoning_content` (`<think>` tokens) in real time to `pi`'s TUI.
-- **In-Browser WASM PoW Solver (`DeepSeekHashV1` SHA-3)**: Solves DeepSeek's proof-of-work challenge directly inside the authenticated `chat.deepseek.com` tab—no manual cookie extraction required, automatically inheriting Cloudflare clearance and `SMSdk` device fingerprint headers.
-- **Stateful Session Chaining (`parent_message_id`)**: Automatically chains multi-turn agent steps onto the active DeepSeek Web `chat_session_id`. Only the initial `ROOT` turn sends the full System Prompt and Skills; subsequent `CHAIN` turns send only incremental `[TOOL_RESULT]` deltas, preserving the full **128K context window** and minimizing latency.
-- **Multi-Format Tool Calling Adapter for `pi` Agent**:
-  - Parses standard OpenAI-style JSON (`{"name": "...", "arguments": {...}}`), flat JSON (`{"name": "bash", "command": "..."}`), native DeepSeek DSML (`<｜DSML｜invoke>`, `<｜｜DSML｜｜ parameter>`), and hybrid JSON + DSML outputs.
-  - Safely handles nested markdown code fences (```` ``` ````) inside `write` / `edit` payloads using `json.JSONDecoder().raw_decode` and coerces non-string parameters (`array`, `number`, `boolean`) against the tool's JSON Schema.
-- **Smart Pacing & Automatic Rate-Limit Recovery**:
-  - Paces rapid back-to-back tool execution turns so DeepSeek Web's burst limiter is avoided.
-  - Automatically retries rate-limited requests with exponential backoff (`[5s, 10s, 16s, 24s, 35s]`) while keeping the stream alive, preventing multi-step coding tasks from aborting.
-- **Interactive Thinking Level Control (`Shift+Tab` in `pi`)**:
-  - Maps `pi` thinking levels directly to DeepSeek Web: `off` disables DeepThink (`thinking_enabled: false`), while `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` enable DeepThink and steer reasoning depth.
+- **OpenAI `/v1/chat/completions` & `/v1/models` Compatible**:
+  - Supports both `stream: true` and `stream: false`, streaming live `reasoning_content` (`<think>` tokens) in real time to the CLI / TUI.
+  - Exposes all standard DeepSeek models (`deepseek-reasoner`, `deepseek-chat`, `deepseek-v4-pro`, `deepseek-r1`, etc.).
+- **In-Browser WASM PoW Solver (`DeepSeekHashV1` SHA-3)**:
+  - Solves DeepSeek's proof-of-work challenge directly inside the authenticated `chat.deepseek.com` tab in milliseconds.
+  - Automatically inherits Cloudflare clearance, session cookies, and `SMSdk` device fingerprint headers.
+- **Dynamic Cryptographic Signature (`x-hif-leim`) Capture**:
+  - Dynamically extracts DeepSeek's anti-bot cryptographic signature via Rspack internals (`addSSEHeader()`), ensuring genuine browser request parity and avoiding backend authorization drops.
+- **Concurrency & Anti-Ban Subagent Guard**:
+  - **Full Turn Locking (`hub.lock`)**: Serializes concurrent requests (subagent tasks, model probes, parallel tool calls) through an asynchronous FIFO queue. Prevents overlapping browser requests that trigger rate-limit bans or session corruptions.
+  - **Per-Request Abort Controller Tracking**: Maps abort signals per request ID (`activeControllers = new Map()`), eliminating `[Local-AI Error: signal is aborted without reason]` when concurrent requests arrive.
+  - **Anti-Ban Directives**: Automatically injects concurrency safeguards into prompts to instruct subagents to work sequentially and avoid high-frequency ping-pong loops.
+- **Stateful Multi-Branch Session Chaining (`SessionState`)**:
+  - Automatically chains multi-turn agent turns onto DeepSeek Web `chat_session_id`.
+  - Multi-session branch caching keeps subagent threads isolated so interleaved calls don't discard active session IDs, preserving the **128K context window** and minimizing input token churn.
+- **Self-Healing Tool Calling & JSON Repair**:
+  - Robust parser for standard OpenAI JSON, flat JSON (`{"name": "bash", "command": "..."}`), Anthropic `tool_use` blocks, and native DeepSeek DSML (`<｜DSML｜invoke>`).
+  - **`_repair_json_brackets` Stack Balancer**: Automatically fixes nested JSON outputs (e.g. `ask_user_question` with 8+ nested options) when models produce unmatched closing brackets (`]}` vs `}]`).
+- **Resilient Auto-Recovery & Smart Backoff**:
+  - Adaptive pacing between rapid agent turns (2.8s–6.0s spacing).
+  - Multi-tier exponential backoff (`[6s, 12s, 20s, 30s, 45s, 60s]`) for both burst rate-limiting (`"Tin nhắn quá thường xuyên"`) and temporary DeepSeek server outages (`"Server is temporarily unavailable."` / `backend_err`).
+- **Seamless Server Daemon & Port Management (`--restart`)**:
+  - Automatically detects when port `8765` is in use.
+  - Run `python3 server.py --restart` to cleanly kill existing listening daemons without disrupting Chrome browser connections.
 
 ---
 
@@ -24,21 +37,21 @@ Turn an active **DeepSeek Web (`https://chat.deepseek.com`)** browser session in
 
 | File | Description |
 | :--- | :--- |
-| `server.py` | Local OpenAI API Server (`http://127.0.0.1:8765/v1`), WebSocket Hub (`ws://127.0.0.1:8765/ws`), SSE patch parser, and Tool Call adapter |
-| `bridge.user.js` | Content Script / Userscript running on `https://chat.deepseek.com` that solves WASM PoW and streams SSE frames over WebSocket |
-| `manifest.json` | Chrome Extension (Manifest V3) configuration for loading the project directly as an unpacked extension |
+| `server.py` | Local OpenAI API Server (`http://127.0.0.1:8765/v1`), WebSocket Hub (`ws://127.0.0.1:8765/ws`), SSE parser, tool adapter, and queue manager |
+| `bridge.user.js` | Browser bridge content script for `https://chat.deepseek.com` that solves WASM PoW, signs headers, and streams SSE to WebSocket |
+| `manifest.json` | Chrome Extension (Manifest V3) configuration for loading the bridge directly as an unpacked extension |
 
 ---
 
 ## 🚀 Quick Start
 
 ### Step 1: Install Python Dependencies
-Only `fastapi`, `uvicorn`, and `websockets` are required:
+Only `fastapi`, `uvicorn`, and `websockets` are required (pure Python standard library for everything else):
 ```bash
 pip install fastapi uvicorn websockets
 ```
 
-Run the built-in self-test suite (verifies the SSE parser, session chaining, tool call extraction, and rate-limit matcher):
+Run the built-in self-test suite (verifies SSE patch parser, session chaining, tool extraction, bracket repairing, and rate-limit recovery):
 ```bash
 python3 server.py --test
 ```
@@ -53,159 +66,47 @@ python3 server.py --test
 3. Click **Load unpacked** and select this repository folder (`deepseek-web-local-api`).
 4. Open `https://chat.deepseek.com`, sign in to your DeepSeek account, and refresh the page (`F5` / `Cmd+R`).
 
-**Option B: Use Tampermonkey / Violentmonkey**
+**Option B: Tampermonkey / Violentmonkey**
 - Create a new userscript, paste the contents of `bridge.user.js`, save, and reload `https://chat.deepseek.com`.
 
 ---
 
 ### Step 3: Start the Local API Server
 
+Start the server:
 ```bash
 python3 server.py
 ```
 
-Once the server is running and `https://chat.deepseek.com` is open in Chrome:
-- The terminal will print: `[Local-AI] 🟢 Chrome tab connected to /ws`
-- A green badge **`🟢 Local AI (API)`** will appear in the bottom-right corner of `chat.deepseek.com`.
+Or restart if an existing background server is holding port `8765`:
+```bash
+python3 server.py --restart
+```
 
-Verify the server health status:
+Once running and `https://chat.deepseek.com` is open in Chrome:
+- Terminal prints: `[Local-AI] 🟢 Chrome tab connected to /ws`
+- A green badge **`🟢 Local AI (API)`** appears in the bottom-right corner of `chat.deepseek.com`.
+
+Verify server health:
 ```bash
 curl http://127.0.0.1:8765/health
+# {"ok":true,"bridge_connected":true,"authenticated":true,"session_id":null,"turns_in_session":0,"queue_waiting":0}
+```
+
+Test a quick CLI question:
+```bash
+python3 server.py --ask "Hello DeepSeek, are you ready?"
 ```
 
 ---
 
-## 🤖 Pigent (`pi` Coding Agent) Configuration
+## 🪢 DeepSeek Harness (`dsh`) Configuration
 
-### 1. Register the Provider & Models in `~/.pi/agent/models.json`
+[DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai) can be configured to route both CLI commands and Web UI sessions through your local server without external API keys.
 
-Add the `deepseek-web-local` provider to `~/.pi/agent/models.json`:
+### 1. Patch Profiles (`cordis.patch.yml`)
 
-```json
-{
-  "providers": {
-    "deepseek-web-local": {
-      "baseUrl": "http://127.0.0.1:8765/v1",
-      "api": "openai-completions",
-      "apiKey": "local",
-      "models": [
-        {
-          "id": "deepseek-reasoner",
-          "name": "DeepSeek R1 / V3.2 Reasoner (Web Local)",
-          "reasoning": true,
-          "thinkingLevelMap": {
-            "off": "none",
-            "minimal": "minimal",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "xhigh",
-            "max": "max"
-          },
-          "input": [
-            "text"
-          ],
-          "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0
-          },
-          "contextWindow": 131072,
-          "maxTokens": 16384,
-          "compat": {
-            "requiresToolResultName": true
-          }
-        },
-        {
-          "id": "deepseek-chat",
-          "name": "DeepSeek V3.2 Chat Fast (Web Local)",
-          "reasoning": false,
-          "input": [
-            "text"
-          ],
-          "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0
-          },
-          "contextWindow": 131072,
-          "maxTokens": 16384,
-          "compat": {
-            "requiresToolResultName": true
-          }
-        }
-      ]
-    }
-  }
-}
-```
-
-### 2. Set the Default Model in `~/.pi/agent/settings.json`
-
-Update `~/.pi/agent/settings.json`:
-
-```json
-{
-  "hideThinkingBlock": false,
-  "defaultThinkingLevel": "medium",
-  "httpIdleTimeoutMs": 0,
-  "defaultProvider": "deepseek-web-local",
-  "defaultModel": "deepseek-reasoner"
-}
-```
-
-### 3. Usage in `pi`
-
-Verify that `pi` recognizes the configured models:
-```bash
-pi --list-models deepseek
-```
-
-Launch `pi` in any project directory:
-```bash
-pi
-```
-
-- **Switch Models**: Type `/model` or press `Ctrl+P` to toggle between:
-  - `deepseek-reasoner`: DeepThink enabled (streams live reasoning thoughts to `pi`).
-  - `deepseek-chat`: DeepThink disabled for fast responses.
-- **Adjust Thinking Level (`Shift+Tab`)**:
-  - `off`: Disables DeepThink on `deepseek-reasoner` (`thinking_enabled: false`).
-  - `minimal` / `low`: Enables DeepThink with concise reasoning (1–3 sentences or <150 words) before acting.
-  - `medium`: Default native DeepThink depth.
-  - `high` / `xhigh` / `max`: Deep architectural and edge-case analysis before executing tools.
-
----
-
-## 🪢 DeepSeek Harness (`dsh`) Integration
-
-[DeepSeek Harness (`@deepseek-ai/dsh` / `dsh`)](https://github.com/deepseek-ai) is the official Cordis-based agent runtime and CLI by DeepSeek AI. You can run `dsh` entirely through your local server without consuming official API credits.
-
-### Method 1: Environment Variables (Quickest)
-
-Export the OpenAI- and Anthropic-compatible environment variables (add them to `~/.zshrc` or `~/.bashrc` for persistence):
-
-```bash
-export DEEPSEEK_BASE_URL="http://127.0.0.1:8765/v1"
-export DEEPSEEK_SEARCH_BASE_URL="http://127.0.0.1:8765/v1"
-export DEEPSEEK_API_KEY="local"
-export DSH_MODEL="deepseek-reasoner"
-```
-
-Then run `dsh` web UI or CLI:
-```bash
-# Start DeepSeek Harness Web UI
-dsh web
-
-# Or run via npx / CLI
-dsh --profile web
-```
-
-### Method 2: Configure `~/.dsh/profiles/web/cordis.patch.yml`
-
-DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordis.patch.yml`. Add the `deepseek-web-local` provider and `web-search-deepseek` provider directly to your profile:
+Configure both headless and web profiles under `~/.dsh/profiles/headless/cordis.patch.yml` and `~/.dsh/profiles/web/cordis.patch.yml`:
 
 ```yaml
 - id: llm-pi-ai
@@ -233,7 +134,7 @@ DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordi
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
     provider: deepseek-web-local
-    model: deepseek-v4-pro
+    model: deepseek-reasoner
 
 - id: web-search-deepseek
   name: "@deepseek-ai/dsh-web-search-deepseek"
@@ -242,7 +143,7 @@ DeepSeek Harness 0.2.x uses Cordis patch layers under `~/.dsh/profiles/web/cordi
     apiKeyEnv: DEEPSEEK_API_KEY
 ```
 
-And define the API key references in `~/.dsh/.credentials.yaml`:
+### 2. Configure Credentials in `~/.dsh/.credentials.yaml`
 
 ```yaml
 version: 1
@@ -253,9 +154,89 @@ refs:
   ANTHROPIC_API_KEY: local
 ```
 
-> **Native Web Search & Sub-Agent Support**:
-> - **Zero-Cost Web Search**: Native `web_search` and `web_fetch` in `dsh` route to the local server's `/v1/messages` endpoint with in-browser DeepSeek Web Search enabled without requiring official API credits.
-> - **Sub-Agent Delegation & Multi-Agent Concurrency**: Natively parses Anthropic-style `tool_use` and `tool_result` content blocks sent by delegated Harness sub-agents. Requests from parallel subagents are serialized via async queue locks, dynamically paced (2.8s–6.0s adaptive spacing based on request velocity), and protected with multi-tier exponential backoff (6s–60s) and global session cooldowns to completely prevent DeepSeek Web burst rate-limiting (`"Tin nhắn quá thường xuyên. Vui lòng thử lại sau."`).
+### 3. Grant Plugin Risk Exemptions (for DSH 0.2.x)
+
+```bash
+dsh plugin --profile web allow-version @deepseek-ai/dsh-llm-pi-ai 0.2.0-rc.2 --accept-risk
+dsh plugin --profile web allow-version @deepseek-ai/dsh-agent-default-model 0.2.0-rc.2 --accept-risk
+dsh plugin --profile web allow-version @deepseek-ai/dsh-web-search-deepseek 0.2.0-rc.2 --accept-risk
+
+dsh plugin --profile headless allow-version @deepseek-ai/dsh-llm-pi-ai 0.2.0-rc.2 --accept-risk
+dsh plugin --profile headless allow-version @deepseek-ai/dsh-agent-default-model 0.2.0-rc.2 --accept-risk
+dsh plugin --profile headless allow-version @deepseek-ai/dsh-web-search-deepseek 0.2.0-rc.2 --accept-risk
+```
+
+### 4. Running `dsh`
+
+- **CLI One-Shot Execution**:
+  ```bash
+  dsh headless "explain the repository structure in 3 bullet points"
+  ```
+- **Web Interface**:
+  ```bash
+  dsh web
+  ```
+
+---
+
+## 🤖 Pigent (`pi` Coding Agent) Configuration
+
+### 1. Register Provider in `~/.pi/agent/models.json`
+
+```json
+{
+  "providers": {
+    "deepseek-web-local": {
+      "baseUrl": "http://127.0.0.1:8765/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "models": [
+        {
+          "id": "deepseek-reasoner",
+          "name": "DeepSeek R1 / V3.2 Reasoner (Web Local)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "input": ["text"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "contextWindow": 131072,
+          "maxTokens": 16384,
+          "compat": { "requiresToolResultName": true }
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek V3.2 Chat Fast (Web Local)",
+          "reasoning": false,
+          "input": ["text"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "contextWindow": 131072,
+          "maxTokens": 16384,
+          "compat": { "requiresToolResultName": true }
+        }
+      ]
+    }
+  }
+}
+```
+
+### 2. Set Default Model in `~/.pi/agent/settings.json`
+
+```json
+{
+  "hideThinkingBlock": false,
+  "defaultThinkingLevel": "medium",
+  "httpIdleTimeoutMs": 0,
+  "defaultProvider": "deepseek-web-local",
+  "defaultModel": "deepseek-reasoner"
+}
+```
 
 ---
 
@@ -270,3 +251,19 @@ refs:
 | `deepseek-coder` | ❌ Disabled | ❌ Disabled | `131,072` (128K) | `8,192` – `16,384` |
 | `deepseek-reasoner-search` | ✅ Enabled | ✅ Enabled | `131,072` (128K) | `16,384` |
 | `deepseek-chat-search` | ❌ Disabled | ✅ Enabled | `131,072` (128K) | `16,384` |
+
+---
+
+## 🛡️ Anti-Ban Best Practices
+
+1. **Avoid Running Too Many Parallel Subagents**:
+   - DeepSeek Web rate-limits accounts that spawn multiple subagents simultaneously. The built-in FIFO lock (`hub.lock`) serializes requests, but delegating tasks sequentially rather than in large parallel batches keeps your account healthy.
+2. **Consolidate Tool Turns**:
+   - Combine file reads, bash operations, and multi-file edits into single consolidated tool calls to prevent rapid micro-turn ping-ponging.
+3. **Automatic Outage & Rate-Limit Handling**:
+   - If DeepSeek shows `"Server is temporarily unavailable"` or `"Tin nhắn quá thường xuyên"`, the server automatically pauses and retries with exponential backoff (`[6s, 12s, 20s, 30s, 45s, 60s]`). Do not force-cancel or repeatedly spam requests during backend outages.
+
+---
+
+## 📜 License
+MIT License. Created for local research and AI agent pair programming.
